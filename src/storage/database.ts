@@ -1,4 +1,5 @@
 import Database from "better-sqlite3";
+import * as sqliteVec from "sqlite-vec";
 import { mkdirSync } from "node:fs";
 import { dirname } from "node:path";
 import { log } from "../utils/logger.js";
@@ -14,8 +15,12 @@ import type {
 
 export class SQLiteStorage implements StorageBackend {
   private db: Database.Database | null = null;
+  private vecEnabled = false;
 
-  constructor(private dbPath: string) {}
+  constructor(
+    private dbPath: string,
+    private embeddingDimensions: number = 768,
+  ) {}
 
   async initialize(): Promise<void> {
     mkdirSync(dirname(this.dbPath), { recursive: true });
@@ -23,6 +28,15 @@ export class SQLiteStorage implements StorageBackend {
     this.db = new Database(this.dbPath);
     this.db.pragma("journal_mode = WAL");
     this.db.pragma("foreign_keys = ON");
+
+    // Load sqlite-vec extension
+    try {
+      sqliteVec.load(this.db);
+      this.vecEnabled = true;
+      log.info("sqlite-vec extension loaded");
+    } catch (err) {
+      log.error("Failed to load sqlite-vec, vector search disabled:", err);
+    }
 
     this.db.exec(`
       CREATE TABLE IF NOT EXISTS memory_chunks (
@@ -48,10 +62,21 @@ export class SQLiteStorage implements StorageBackend {
       );
     `);
 
+    if (this.vecEnabled) {
+      this.db.exec(`
+        CREATE VIRTUAL TABLE IF NOT EXISTS vec_chunks USING vec0(
+          chunk_id TEXT PRIMARY KEY,
+          embedding FLOAT[${this.embeddingDimensions}]
+        );
+      `);
+    }
+
     const count = this.db
       .prepare("SELECT COUNT(*) as count FROM memory_chunks")
       .get() as { count: number };
-    log.info(`Initialized SQLite storage at ${this.dbPath} (${count.count} memories)`);
+    log.info(
+      `Initialized SQLite storage at ${this.dbPath} (${count.count} memories, vec: ${this.vecEnabled})`,
+    );
   }
 
   async close(): Promise<void> {
@@ -59,7 +84,10 @@ export class SQLiteStorage implements StorageBackend {
     this.db = null;
   }
 
-  async addChunk(chunk: MemoryChunk): Promise<MemoryChunk> {
+  async addChunk(
+    chunk: MemoryChunk,
+    embedding?: Float32Array,
+  ): Promise<MemoryChunk> {
     const db = this.getDb();
     const insert = db.transaction(() => {
       db.prepare(
@@ -78,6 +106,12 @@ export class SQLiteStorage implements StorageBackend {
       db.prepare(
         "INSERT INTO fts_chunks (chunk_id, content) VALUES (?, ?)",
       ).run(chunk.id, chunk.content);
+
+      if (embedding && this.vecEnabled) {
+        db.prepare(
+          "INSERT INTO vec_chunks (chunk_id, embedding) VALUES (?, ?)",
+        ).run(chunk.id, Buffer.from(embedding.buffer));
+      }
     });
 
     insert();
@@ -99,6 +133,9 @@ export class SQLiteStorage implements StorageBackend {
         .prepare("DELETE FROM memory_chunks WHERE id = ?")
         .run(id);
       db.prepare("DELETE FROM fts_chunks WHERE chunk_id = ?").run(id);
+      if (this.vecEnabled) {
+        db.prepare("DELETE FROM vec_chunks WHERE chunk_id = ?").run(id);
+      }
       return result.changes > 0;
     });
 
@@ -109,8 +146,9 @@ export class SQLiteStorage implements StorageBackend {
     query: string,
     limit: number,
     filters?: SearchFilters,
+    queryEmbedding?: Float32Array,
   ): Promise<SearchResult[]> {
-    return this.keywordSearch(query, limit, filters);
+    return this.hybridSearch(query, limit, filters, queryEmbedding);
   }
 
   async list(
@@ -118,7 +156,10 @@ export class SQLiteStorage implements StorageBackend {
     offset: number,
     filters?: SearchFilters,
   ): Promise<MemoryChunk[]> {
-    const { where, params } = this.buildFilterClause(filters, "memory_chunks");
+    const { where, params } = this.buildFilterClause(
+      filters,
+      "memory_chunks",
+    );
     const sql = `
       SELECT * FROM memory_chunks
       ${where ? `WHERE ${where}` : ""}
@@ -171,6 +212,103 @@ export class SQLiteStorage implements StorageBackend {
     };
   }
 
+  get isVecEnabled(): boolean {
+    return this.vecEnabled;
+  }
+
+  hybridSearch(
+    query: string,
+    limit: number,
+    filters?: SearchFilters,
+    queryEmbedding?: Float32Array,
+  ): SearchResult[] {
+    const keywordResults = this.keywordSearch(query, limit * 3, filters);
+
+    if (!queryEmbedding || !this.vecEnabled) {
+      return keywordResults.slice(0, limit);
+    }
+
+    let vectorResults: SearchResult[] = [];
+    try {
+      vectorResults = this.vectorSearch(queryEmbedding, limit * 3, filters);
+    } catch (err) {
+      log.error("Vector search failed, using keyword-only:", err);
+      return keywordResults.slice(0, limit);
+    }
+
+    // Merge with 70% vector / 30% keyword weighting
+    const scoreMap = new Map<string, { chunk: MemoryChunk; vectorScore: number; keywordScore: number }>();
+
+    for (const r of vectorResults) {
+      scoreMap.set(r.chunk.id, {
+        chunk: r.chunk,
+        vectorScore: r.score,
+        keywordScore: 0,
+      });
+    }
+
+    for (const r of keywordResults) {
+      const existing = scoreMap.get(r.chunk.id);
+      if (existing) {
+        existing.keywordScore = r.score;
+      } else {
+        scoreMap.set(r.chunk.id, {
+          chunk: r.chunk,
+          vectorScore: 0,
+          keywordScore: r.score,
+        });
+      }
+    }
+
+    const merged: SearchResult[] = [];
+    for (const entry of scoreMap.values()) {
+      merged.push({
+        chunk: entry.chunk,
+        score: entry.vectorScore * 0.7 + entry.keywordScore * 0.3,
+      });
+    }
+
+    merged.sort((a, b) => b.score - a.score);
+    return merged.slice(0, limit);
+  }
+
+  vectorSearch(
+    queryEmbedding: Float32Array,
+    limit: number,
+    filters?: SearchFilters,
+  ): SearchResult[] {
+    if (!this.vecEnabled) return [];
+
+    const db = this.getDb();
+    const sql = `
+      SELECT vc.chunk_id, vc.distance, mc.*
+      FROM vec_chunks vc
+      JOIN memory_chunks mc ON mc.id = vc.chunk_id
+      WHERE vc.embedding MATCH ?
+        AND k = ?
+      ORDER BY vc.distance
+    `;
+
+    const rows = db
+      .prepare(sql)
+      .all(Buffer.from(queryEmbedding.buffer), limit) as (RawChunkRow & {
+      chunk_id: string;
+      distance: number;
+    })[];
+
+    // Convert cosine distance to similarity score (0-1)
+    const results: SearchResult[] = rows.map((row) => ({
+      chunk: this.rowToChunk(row),
+      score: 1 / (1 + row.distance),
+    }));
+
+    // Apply filters post-query (vec0 doesn't support WHERE on joined tables in MATCH)
+    if (filters) {
+      return results.filter((r) => this.matchesFilters(r.chunk, filters));
+    }
+    return results;
+  }
+
   keywordSearch(
     query: string,
     limit: number,
@@ -195,10 +333,14 @@ export class SQLiteStorage implements StorageBackend {
     try {
       const rows = this.getDb()
         .prepare(sql)
-        .all(sanitized, ...params, limit) as (RawChunkRow & { rank: number })[];
+        .all(sanitized, ...params, limit) as (RawChunkRow & {
+        rank: number;
+      })[];
 
       // BM25 returns negative scores (lower = better match), normalize to 0-1
-      const maxRank = rows.length ? Math.abs(rows[rows.length - 1].rank) : 1;
+      const maxRank = rows.length
+        ? Math.abs(rows[rows.length - 1].rank)
+        : 1;
       const minRank = rows.length ? Math.abs(rows[0].rank) : 0;
       const range = maxRank - minRank || 1;
 
@@ -217,7 +359,10 @@ export class SQLiteStorage implements StorageBackend {
     limit: number,
     filters?: SearchFilters,
   ): SearchResult[] {
-    const { where, params } = this.buildFilterClause(filters, "memory_chunks");
+    const { where, params } = this.buildFilterClause(
+      filters,
+      "memory_chunks",
+    );
     const filterClause = where ? `AND ${where}` : "";
 
     const sql = `
@@ -236,6 +381,24 @@ export class SQLiteStorage implements StorageBackend {
       chunk: this.rowToChunk(row),
       score: 1 - i / (rows.length || 1),
     }));
+  }
+
+  private matchesFilters(
+    chunk: MemoryChunk,
+    filters: SearchFilters,
+  ): boolean {
+    if (filters.category && chunk.category !== filters.category) return false;
+    if (filters.source && chunk.source !== filters.source) return false;
+    if (
+      filters.minImportance !== undefined &&
+      chunk.importance < filters.minImportance
+    )
+      return false;
+    if (filters.tags && filters.tags.length > 0) {
+      const hasTag = filters.tags.some((t) => chunk.tags.includes(t));
+      if (!hasTag) return false;
+    }
+    return true;
   }
 
   private sanitizeFTS5(text: string): string {
@@ -274,7 +437,7 @@ export class SQLiteStorage implements StorageBackend {
     if (filters.tags && filters.tags.length > 0) {
       const tagConditions = filters.tags.map(() => `${t}.tags LIKE ?`);
       conditions.push(`(${tagConditions.join(" OR ")})`);
-      params.push(...filters.tags.map((t) => `%"${t}"%`));
+      params.push(...filters.tags.map((tag) => `%"${tag}"%`));
     }
 
     return {

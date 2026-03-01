@@ -5,6 +5,9 @@ import { StdioServerTransport } from "@modelcontextprotocol/sdk/server/stdio.js"
 import { homedir } from "node:os";
 import { join } from "node:path";
 import { SQLiteStorage } from "./storage/database.js";
+import { detectEmbeddingProvider } from "./embeddings/detect.js";
+import { LRUEmbeddingCache } from "./embeddings/cache.js";
+import type { EmbeddingProvider } from "./embeddings/providers.js";
 import { registerStoreTools } from "./tools/store.js";
 import { registerSearchTools } from "./tools/search.js";
 import { registerListTools } from "./tools/list.js";
@@ -12,23 +15,37 @@ import { registerDeleteTools } from "./tools/delete.js";
 import { registerStatsTools } from "./tools/stats.js";
 import { log } from "./utils/logger.js";
 
-const dbPath =
-  process.env.MEMORY_DB_PATH || join(homedir(), ".memory-mcp", "memory.db");
-const storage = new SQLiteStorage(dbPath);
-
-const server = new McpServer({
-  name: "memory-mcp",
-  version: "0.1.0",
-});
-
-registerStoreTools(server, storage);
-registerSearchTools(server, storage);
-registerListTools(server, storage);
-registerDeleteTools(server, storage);
-registerStatsTools(server, storage);
-
 async function main() {
+  // Detect embedding provider first (needed for DB dimensions)
+  const embeddingProvider = await detectEmbeddingProvider();
+  const cache = new LRUEmbeddingCache();
+
+  const dbPath =
+    process.env.MEMORY_DB_PATH || join(homedir(), ".memory-mcp", "memory.db");
+  const storage = new SQLiteStorage(dbPath, embeddingProvider.dimensions);
   await storage.initialize();
+
+  const server = new McpServer({
+    name: "memory-mcp",
+    version: "0.2.0",
+  });
+
+  // Helper to get or create cached embedding
+  const getEmbedding = async (text: string): Promise<Float32Array> => {
+    const hash = LRUEmbeddingCache.hash(text);
+    const cached = cache.get(hash);
+    if (cached) return cached;
+
+    const embedding = await embeddingProvider.generateEmbedding(text);
+    cache.set(hash, embedding);
+    return embedding;
+  };
+
+  registerStoreTools(server, storage, getEmbedding);
+  registerSearchTools(server, storage, getEmbedding);
+  registerListTools(server, storage);
+  registerDeleteTools(server, storage);
+  registerStatsTools(server, storage);
 
   const transport = new StdioServerTransport();
   await server.connect(transport);
