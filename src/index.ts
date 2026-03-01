@@ -30,7 +30,7 @@ async function main() {
 
   const server = new McpServer({
     name: "memory-mcp",
-    version: "0.3.0",
+    version: "1.0.0",
   });
 
   // Helper to get or create cached embedding
@@ -62,6 +62,17 @@ async function main() {
     : [];
   const fileWatcher = new FileWatcher(storage, getEmbedding, watchPaths);
   await fileWatcher.start();
+
+  // Graceful shutdown
+  const shutdown = async () => {
+    log.info("Shutting down...");
+    await fileWatcher.stop();
+    await storage.close();
+    process.exit(0);
+  };
+
+  process.on("SIGINT", shutdown);
+  process.on("SIGTERM", shutdown);
 
   const transport = new StdioServerTransport();
   await server.connect(transport);
