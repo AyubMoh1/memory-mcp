@@ -1,33 +1,108 @@
+import Database from "better-sqlite3";
+import { mkdirSync } from "node:fs";
+import { dirname } from "node:path";
+import { log } from "../utils/logger.js";
 import type {
   MemoryChunk,
+  MemoryCategory,
+  MemorySource,
   SearchFilters,
   SearchResult,
   StorageBackend,
   StorageStats,
 } from "./types.js";
 
-export class InMemoryStorage implements StorageBackend {
-  private chunks: Map<string, MemoryChunk> = new Map();
+export class SQLiteStorage implements StorageBackend {
+  private db: Database.Database | null = null;
+
+  constructor(private dbPath: string) {}
 
   async initialize(): Promise<void> {
-    // No-op for in-memory storage
+    mkdirSync(dirname(this.dbPath), { recursive: true });
+
+    this.db = new Database(this.dbPath);
+    this.db.pragma("journal_mode = WAL");
+    this.db.pragma("foreign_keys = ON");
+
+    this.db.exec(`
+      CREATE TABLE IF NOT EXISTS memory_chunks (
+        id TEXT PRIMARY KEY,
+        content TEXT NOT NULL,
+        source TEXT NOT NULL DEFAULT 'system',
+        category TEXT NOT NULL DEFAULT 'fact',
+        tags TEXT DEFAULT '[]',
+        importance REAL DEFAULT 0.5,
+        timestamp INTEGER NOT NULL,
+        created_at INTEGER DEFAULT (unixepoch() * 1000)
+      );
+
+      CREATE INDEX IF NOT EXISTS idx_chunks_source ON memory_chunks(source);
+      CREATE INDEX IF NOT EXISTS idx_chunks_category ON memory_chunks(category);
+      CREATE INDEX IF NOT EXISTS idx_chunks_timestamp ON memory_chunks(timestamp);
+      CREATE INDEX IF NOT EXISTS idx_chunks_importance ON memory_chunks(importance);
+
+      CREATE VIRTUAL TABLE IF NOT EXISTS fts_chunks USING fts5(
+        chunk_id UNINDEXED,
+        content,
+        tokenize = 'porter unicode61'
+      );
+    `);
+
+    const count = this.db
+      .prepare("SELECT COUNT(*) as count FROM memory_chunks")
+      .get() as { count: number };
+    log.info(`Initialized SQLite storage at ${this.dbPath} (${count.count} memories)`);
   }
 
   async close(): Promise<void> {
-    this.chunks.clear();
+    this.db?.close();
+    this.db = null;
   }
 
   async addChunk(chunk: MemoryChunk): Promise<MemoryChunk> {
-    this.chunks.set(chunk.id, chunk);
+    const db = this.getDb();
+    const insert = db.transaction(() => {
+      db.prepare(
+        `INSERT INTO memory_chunks (id, content, source, category, tags, importance, timestamp)
+         VALUES (?, ?, ?, ?, ?, ?, ?)`,
+      ).run(
+        chunk.id,
+        chunk.content,
+        chunk.source,
+        chunk.category,
+        JSON.stringify(chunk.tags),
+        chunk.importance,
+        chunk.timestamp,
+      );
+
+      db.prepare(
+        "INSERT INTO fts_chunks (chunk_id, content) VALUES (?, ?)",
+      ).run(chunk.id, chunk.content);
+    });
+
+    insert();
     return chunk;
   }
 
   async getChunk(id: string): Promise<MemoryChunk | null> {
-    return this.chunks.get(id) ?? null;
+    const row = this.getDb()
+      .prepare("SELECT * FROM memory_chunks WHERE id = ?")
+      .get(id) as RawChunkRow | undefined;
+
+    return row ? this.rowToChunk(row) : null;
   }
 
   async deleteChunk(id: string): Promise<boolean> {
-    return this.chunks.delete(id);
+    const db = this.getDb();
+    const del = db.transaction(() => {
+      const result = db
+        .prepare("DELETE FROM memory_chunks WHERE id = ?")
+        .run(id);
+      db.prepare("DELETE FROM fts_chunks WHERE chunk_id = ?").run(id);
+      return result.changes > 0;
+    });
+
+    return del();
   }
 
   async search(
@@ -35,28 +110,7 @@ export class InMemoryStorage implements StorageBackend {
     limit: number,
     filters?: SearchFilters,
   ): Promise<SearchResult[]> {
-    const queryLower = query.toLowerCase();
-    const words = queryLower.split(/\s+/).filter(Boolean);
-
-    const results: SearchResult[] = [];
-
-    for (const chunk of this.chunks.values()) {
-      if (!this.matchesFilters(chunk, filters)) continue;
-
-      const contentLower = chunk.content.toLowerCase();
-      let matchedWords = 0;
-      for (const word of words) {
-        if (contentLower.includes(word)) matchedWords++;
-      }
-
-      if (matchedWords === 0) continue;
-
-      const score = matchedWords / words.length;
-      results.push({ chunk, score });
-    }
-
-    results.sort((a, b) => b.score - a.score);
-    return results.slice(0, limit);
+    return this.keywordSearch(query, limit, filters);
   }
 
   async list(
@@ -64,50 +118,196 @@ export class InMemoryStorage implements StorageBackend {
     offset: number,
     filters?: SearchFilters,
   ): Promise<MemoryChunk[]> {
-    let chunks = Array.from(this.chunks.values());
+    const { where, params } = this.buildFilterClause(filters, "memory_chunks");
+    const sql = `
+      SELECT * FROM memory_chunks
+      ${where ? `WHERE ${where}` : ""}
+      ORDER BY timestamp DESC
+      LIMIT ? OFFSET ?
+    `;
+    params.push(limit, offset);
 
-    if (filters) {
-      chunks = chunks.filter((c) => this.matchesFilters(c, filters));
-    }
-
-    chunks.sort((a, b) => b.timestamp - a.timestamp);
-    return chunks.slice(offset, offset + limit);
+    const rows = this.getDb().prepare(sql).all(...params) as RawChunkRow[];
+    return rows.map((r) => this.rowToChunk(r));
   }
 
   async getStats(): Promise<StorageStats> {
-    const chunks = Array.from(this.chunks.values());
+    const db = this.getDb();
+
+    const total = db
+      .prepare("SELECT COUNT(*) as count FROM memory_chunks")
+      .get() as { count: number };
+
+    const categoryRows = db
+      .prepare(
+        "SELECT category, COUNT(*) as count FROM memory_chunks GROUP BY category",
+      )
+      .all() as { category: string; count: number }[];
+
+    const sourceRows = db
+      .prepare(
+        "SELECT source, COUNT(*) as count FROM memory_chunks GROUP BY source",
+      )
+      .all() as { source: string; count: number }[];
+
+    const dateRange = db
+      .prepare(
+        "SELECT MIN(timestamp) as oldest, MAX(timestamp) as newest FROM memory_chunks",
+      )
+      .get() as { oldest: number | null; newest: number | null };
+
     const byCategory: Record<string, number> = {};
+    for (const row of categoryRows) byCategory[row.category] = row.count;
+
     const bySource: Record<string, number> = {};
-
-    for (const chunk of chunks) {
-      byCategory[chunk.category] = (byCategory[chunk.category] ?? 0) + 1;
-      bySource[chunk.source] = (bySource[chunk.source] ?? 0) + 1;
-    }
-
-    const timestamps = chunks.map((c) => c.timestamp);
+    for (const row of sourceRows) bySource[row.source] = row.count;
 
     return {
-      totalChunks: chunks.length,
+      totalChunks: total.count,
       byCategory,
       bySource,
-      oldestTimestamp: timestamps.length ? Math.min(...timestamps) : null,
-      newestTimestamp: timestamps.length ? Math.max(...timestamps) : null,
+      oldestTimestamp: dateRange.oldest,
+      newestTimestamp: dateRange.newest,
     };
   }
 
-  private matchesFilters(chunk: MemoryChunk, filters?: SearchFilters): boolean {
-    if (!filters) return true;
-    if (filters.category && chunk.category !== filters.category) return false;
-    if (filters.source && chunk.source !== filters.source) return false;
-    if (
-      filters.minImportance !== undefined &&
-      chunk.importance < filters.minImportance
-    )
-      return false;
-    if (filters.tags && filters.tags.length > 0) {
-      const hasTag = filters.tags.some((t) => chunk.tags.includes(t));
-      if (!hasTag) return false;
+  keywordSearch(
+    query: string,
+    limit: number,
+    filters?: SearchFilters,
+  ): SearchResult[] {
+    const sanitized = this.sanitizeFTS5(query);
+    if (!sanitized) return [];
+
+    const { where, params } = this.buildFilterClause(filters);
+    const filterJoin = where ? `AND ${where}` : "";
+
+    const sql = `
+      SELECT mc.*, bm25(fts_chunks) as rank
+      FROM fts_chunks
+      JOIN memory_chunks mc ON mc.id = fts_chunks.chunk_id
+      WHERE fts_chunks MATCH ?
+      ${filterJoin}
+      ORDER BY rank
+      LIMIT ?
+    `;
+
+    try {
+      const rows = this.getDb()
+        .prepare(sql)
+        .all(sanitized, ...params, limit) as (RawChunkRow & { rank: number })[];
+
+      // BM25 returns negative scores (lower = better match), normalize to 0-1
+      const maxRank = rows.length ? Math.abs(rows[rows.length - 1].rank) : 1;
+      const minRank = rows.length ? Math.abs(rows[0].rank) : 0;
+      const range = maxRank - minRank || 1;
+
+      return rows.map((row) => ({
+        chunk: this.rowToChunk(row),
+        score: 1 - (Math.abs(row.rank) - minRank) / range,
+      }));
+    } catch (err) {
+      log.error("FTS5 search failed, falling back to LIKE:", err);
+      return this.fallbackSearch(query, limit, filters);
     }
-    return true;
   }
+
+  private fallbackSearch(
+    query: string,
+    limit: number,
+    filters?: SearchFilters,
+  ): SearchResult[] {
+    const { where, params } = this.buildFilterClause(filters, "memory_chunks");
+    const filterClause = where ? `AND ${where}` : "";
+
+    const sql = `
+      SELECT * FROM memory_chunks
+      WHERE content LIKE ?
+      ${filterClause}
+      ORDER BY timestamp DESC
+      LIMIT ?
+    `;
+
+    const rows = this.getDb()
+      .prepare(sql)
+      .all(`%${query}%`, ...params, limit) as RawChunkRow[];
+
+    return rows.map((row, i) => ({
+      chunk: this.rowToChunk(row),
+      score: 1 - i / (rows.length || 1),
+    }));
+  }
+
+  private sanitizeFTS5(text: string): string {
+    return text
+      .replace(/[^\w\s]/g, " ")
+      .replace(/\b(AND|OR|NOT|NEAR)\b/gi, "")
+      .replace(/\s+/g, " ")
+      .trim();
+  }
+
+  private buildFilterClause(
+    filters?: SearchFilters,
+    tableAlias: string = "mc",
+  ): {
+    where: string;
+    params: unknown[];
+  } {
+    if (!filters) return { where: "", params: [] };
+
+    const t = tableAlias;
+    const conditions: string[] = [];
+    const params: unknown[] = [];
+
+    if (filters.category) {
+      conditions.push(`${t}.category = ?`);
+      params.push(filters.category);
+    }
+    if (filters.source) {
+      conditions.push(`${t}.source = ?`);
+      params.push(filters.source);
+    }
+    if (filters.minImportance !== undefined) {
+      conditions.push(`${t}.importance >= ?`);
+      params.push(filters.minImportance);
+    }
+    if (filters.tags && filters.tags.length > 0) {
+      const tagConditions = filters.tags.map(() => `${t}.tags LIKE ?`);
+      conditions.push(`(${tagConditions.join(" OR ")})`);
+      params.push(...filters.tags.map((t) => `%"${t}"%`));
+    }
+
+    return {
+      where: conditions.join(" AND "),
+      params,
+    };
+  }
+
+  private rowToChunk(row: RawChunkRow): MemoryChunk {
+    return {
+      id: row.id,
+      content: row.content,
+      source: row.source as MemorySource,
+      category: row.category as MemoryCategory,
+      tags: JSON.parse(row.tags || "[]"),
+      importance: row.importance,
+      timestamp: row.timestamp,
+    };
+  }
+
+  private getDb(): Database.Database {
+    if (!this.db) throw new Error("Database not initialized");
+    return this.db;
+  }
+}
+
+interface RawChunkRow {
+  id: string;
+  content: string;
+  source: string;
+  category: string;
+  tags: string;
+  importance: number;
+  timestamp: number;
+  created_at: number;
 }
