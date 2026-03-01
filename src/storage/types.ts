@@ -46,13 +46,14 @@ export interface StorageStats {
 export interface StorageBackend {
   initialize(): Promise<void>;
   close(): Promise<void>;
-  addChunk(chunk: MemoryChunk): Promise<MemoryChunk>;
+  addChunk(chunk: MemoryChunk, embedding?: Float32Array): Promise<MemoryChunk>;
   getChunk(id: string): Promise<MemoryChunk | null>;
   deleteChunk(id: string): Promise<boolean>;
   search(
     query: string,
     limit: number,
     filters?: SearchFilters,
+    queryEmbedding?: Float32Array,
   ): Promise<SearchResult[]>;
   list(
     limit: number,

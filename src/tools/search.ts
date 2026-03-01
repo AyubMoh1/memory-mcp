@@ -1,17 +1,19 @@
 import { z } from "zod";
 import type { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
 import type { StorageBackend, MemoryCategory } from "../storage/types.js";
+import { log } from "../utils/logger.js";
 
 export function registerSearchTools(
   server: McpServer,
   storage: StorageBackend,
+  getEmbedding: (text: string) => Promise<Float32Array>,
 ) {
   server.registerTool(
     "memory_search",
     {
       title: "Search Memory",
       description:
-        "Search stored memories using keyword matching. Returns the most relevant results ranked by score.",
+        "Search stored memories using hybrid vector + keyword matching. Returns the most relevant results ranked by combined score.",
       inputSchema: {
         query: z.string().describe("Search query"),
         limit: z
@@ -44,11 +46,23 @@ export function registerSearchTools(
       },
     },
     async (input) => {
-      const results = await storage.search(input.query, input.limit ?? 10, {
-        category: input.category as MemoryCategory | undefined,
-        tags: input.tags,
-        minImportance: input.min_importance,
-      });
+      let queryEmbedding: Float32Array | undefined;
+      try {
+        queryEmbedding = await getEmbedding(input.query);
+      } catch (err) {
+        log.error("Failed to generate query embedding, using keyword-only:", err);
+      }
+
+      const results = await storage.search(
+        input.query,
+        input.limit ?? 10,
+        {
+          category: input.category as MemoryCategory | undefined,
+          tags: input.tags,
+          minImportance: input.min_importance,
+        },
+        queryEmbedding,
+      );
 
       if (results.length === 0) {
         return {
