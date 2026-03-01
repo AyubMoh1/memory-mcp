@@ -15,6 +15,7 @@ import { registerStatsTools } from "./tools/stats.js";
 import { registerContextTools } from "./tools/context.js";
 import { registerStatsResource } from "./resources/stats.js";
 import { registerRecentResource } from "./resources/recent.js";
+import { FileWatcher } from "./sync/file-watcher.js";
 import { log } from "./utils/logger.js";
 
 async function main() {
@@ -54,6 +55,13 @@ async function main() {
   // Resources
   registerStatsResource(server, storage);
   registerRecentResource(server, storage);
+
+  // File watching
+  const watchPaths = process.env.MEMORY_WATCH_PATHS
+    ? process.env.MEMORY_WATCH_PATHS.split(",").map((p) => p.trim()).filter(Boolean)
+    : [];
+  const fileWatcher = new FileWatcher(storage, getEmbedding, watchPaths);
+  await fileWatcher.start();
 
   const transport = new StdioServerTransport();
   await server.connect(transport);
