@@ -1,6 +1,6 @@
 {
   "name": "memory-mcp",
-  "version": "0.1.0",
+  "version": "1.0.0",
   "description": "Persistent memory MCP server for Claude Code — vector + keyword hybrid search",
   "type": "module",
   "bin": {
