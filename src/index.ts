@@ -7,12 +7,14 @@ import { join } from "node:path";
 import { SQLiteStorage } from "./storage/database.js";
 import { detectEmbeddingProvider } from "./embeddings/detect.js";
 import { LRUEmbeddingCache } from "./embeddings/cache.js";
-import type { EmbeddingProvider } from "./embeddings/providers.js";
 import { registerStoreTools } from "./tools/store.js";
 import { registerSearchTools } from "./tools/search.js";
 import { registerListTools } from "./tools/list.js";
 import { registerDeleteTools } from "./tools/delete.js";
 import { registerStatsTools } from "./tools/stats.js";
+import { registerContextTools } from "./tools/context.js";
+import { registerStatsResource } from "./resources/stats.js";
+import { registerRecentResource } from "./resources/recent.js";
 import { log } from "./utils/logger.js";
 
 async function main() {
@@ -27,7 +29,7 @@ async function main() {
 
   const server = new McpServer({
     name: "memory-mcp",
-    version: "0.2.0",
+    version: "0.3.0",
   });
 
   // Helper to get or create cached embedding
@@ -41,11 +43,17 @@ async function main() {
     return embedding;
   };
 
+  // Tools
   registerStoreTools(server, storage, getEmbedding);
   registerSearchTools(server, storage, getEmbedding);
   registerListTools(server, storage);
   registerDeleteTools(server, storage);
   registerStatsTools(server, storage);
+  registerContextTools(server, storage, getEmbedding);
+
+  // Resources
+  registerStatsResource(server, storage);
+  registerRecentResource(server, storage);
 
   const transport = new StdioServerTransport();
   await server.connect(transport);
