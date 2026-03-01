@@ -1,0 +1,34 @@
+{
+  "name": "memory-mcp",
+  "version": "0.1.0",
+  "description": "Persistent memory MCP server for Claude Code — vector + keyword hybrid search",
+  "type": "module",
+  "bin": {
+    "memory-mcp": "./dist/index.js"
+  },
+  "files": [
+    "dist"
+  ],
+  "scripts": {
+    "build": "tsc && chmod 755 dist/index.js",
+    "dev": "tsx src/index.ts",
+    "watch": "tsc --watch"
+  },
+  "dependencies": {
+    "@modelcontextprotocol/sdk": "^1.27.0",
+    "zod": "^3.24.0"
+  },
+  "devDependencies": {
+    "@types/node": "^22.0.0",
+    "tsx": "^4.19.0",
+    "typescript": "^5.6.0"
+  },
+  "keywords": [
+    "mcp",
+    "memory",
+    "claude",
+    "vector-search",
+    "persistent-memory"
+  ],
+  "license": "MIT"
+}
