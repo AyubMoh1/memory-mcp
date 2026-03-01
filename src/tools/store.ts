@@ -7,6 +7,7 @@ import { log } from "../utils/logger.js";
 export function registerStoreTools(
   server: McpServer,
   storage: StorageBackend,
+  getEmbedding: (text: string) => Promise<Float32Array>,
 ) {
   server.registerTool(
     "memory_store",
@@ -50,15 +51,25 @@ export function registerStoreTools(
       },
     },
     async (input) => {
-      const chunk = await storage.addChunk({
-        id: generateId(),
-        content: input.content,
-        source: (input.source ?? "system") as MemorySource,
-        category: (input.category ?? "fact") as MemoryCategory,
-        tags: input.tags ?? [],
-        importance: input.importance ?? 0.5,
-        timestamp: Date.now(),
-      });
+      let embedding: Float32Array | undefined;
+      try {
+        embedding = await getEmbedding(input.content);
+      } catch (err) {
+        log.error("Failed to generate embedding, storing without:", err);
+      }
+
+      const chunk = await storage.addChunk(
+        {
+          id: generateId(),
+          content: input.content,
+          source: (input.source ?? "system") as MemorySource,
+          category: (input.category ?? "fact") as MemoryCategory,
+          tags: input.tags ?? [],
+          importance: input.importance ?? 0.5,
+          timestamp: Date.now(),
+        },
+        embedding,
+      );
 
       log.debug("Stored memory:", chunk.id);
 
