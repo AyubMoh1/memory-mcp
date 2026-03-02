@@ -62,7 +62,8 @@ export function registerContextTools(
       const fitted: string[] = [];
 
       for (const result of results) {
-        const entry = `[${result.chunk.category}] (score: ${result.score.toFixed(2)}, importance: ${result.chunk.importance}) ${result.chunk.content}`;
+        const effImp = result.effectiveImportance ?? result.chunk.importance;
+        const entry = `[${result.chunk.category}] (score: ${result.score.toFixed(2)}, importance: ${effImp.toFixed(2)}) ${result.chunk.content}`;
         const tokens = estimateTokens(entry);
 
         if (tokenCount + tokens > budget) break;

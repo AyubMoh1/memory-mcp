@@ -38,6 +38,16 @@ export function registerStatsTools(
         );
       }
 
+      if (stats.decayStats) {
+        lines.push(
+          "",
+          "Decay:",
+          `  Never accessed: ${stats.decayStats.neverAccessed}`,
+          `  Avg access count: ${stats.decayStats.avgAccessCount.toFixed(1)}`,
+          `  Below prune threshold: ${stats.decayStats.belowPruneThreshold}`,
+        );
+      }
+
       return {
         content: [{ type: "text" as const, text: lines.join("\n") }],
       };

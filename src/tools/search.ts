@@ -73,10 +73,12 @@ export function registerSearchTools(
       }
 
       const formatted = results
-        .map(
-          (r) =>
-            `[${r.chunk.id}] (score: ${r.score.toFixed(2)}, ${r.chunk.category}) ${r.chunk.content}`,
-        )
+        .map((r) => {
+          const decayInfo = r.effectiveImportance !== undefined
+            ? `, eff: ${r.effectiveImportance.toFixed(2)}`
+            : "";
+          return `[${r.chunk.id}] (score: ${r.score.toFixed(2)}, ${r.chunk.category}${decayInfo}) ${r.chunk.content}`;
+        })
         .join("\n---\n");
 
       return {
