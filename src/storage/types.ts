@@ -6,6 +6,8 @@ export interface MemoryChunk {
   tags: string[];
   importance: number;
   timestamp: number;
+  lastAccessed?: number | null;
+  accessCount?: number;
 }
 
 export type MemorySource =
@@ -33,6 +35,7 @@ export interface SearchFilters {
 export interface SearchResult {
   chunk: MemoryChunk;
   score: number;
+  effectiveImportance?: number;
 }
 
 export interface StorageStats {
@@ -41,6 +44,20 @@ export interface StorageStats {
   bySource: Record<string, number>;
   oldestTimestamp: number | null;
   newestTimestamp: number | null;
+  decayStats?: {
+    neverAccessed: number;
+    avgAccessCount: number;
+    belowPruneThreshold: number;
+  };
+}
+
+export interface DecayConfig {
+  halfLifeDays: number;
+  accessBoostMax: number;
+  accessBoostRate: number;
+  pruneThreshold: number;
+  pruneIntervalMs: number;
+  enabled: boolean;
 }
 
 export interface StorageBackend {

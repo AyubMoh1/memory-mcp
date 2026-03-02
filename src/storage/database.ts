@@ -11,16 +11,31 @@ import type {
   SearchResult,
   StorageBackend,
   StorageStats,
+  DecayConfig,
 } from "./types.js";
+
+const DEFAULT_DECAY_CONFIG: DecayConfig = {
+  halfLifeDays: 30,
+  accessBoostMax: 0.20,
+  accessBoostRate: 0.05,
+  pruneThreshold: 0.05,
+  pruneIntervalMs: 3600000, // 60 minutes
+  enabled: true,
+};
 
 export class SQLiteStorage implements StorageBackend {
   private db: Database.Database | null = null;
   private vecEnabled = false;
+  private decayConfig: DecayConfig;
+  private lastPruneTime = 0;
 
   constructor(
     private dbPath: string,
     private embeddingDimensions: number = 768,
-  ) {}
+    decayConfig?: Partial<DecayConfig>,
+  ) {
+    this.decayConfig = { ...DEFAULT_DECAY_CONFIG, ...decayConfig };
+  }
 
   async initialize(): Promise<void> {
     mkdirSync(dirname(this.dbPath), { recursive: true });
@@ -62,6 +77,23 @@ export class SQLiteStorage implements StorageBackend {
       );
     `);
 
+    // Migration: add access tracking columns
+    try {
+      this.db.exec(`ALTER TABLE memory_chunks ADD COLUMN last_accessed INTEGER DEFAULT NULL`);
+      log.info("Migration: added last_accessed column");
+    } catch {
+      // Column already exists
+    }
+
+    try {
+      this.db.exec(`ALTER TABLE memory_chunks ADD COLUMN access_count INTEGER DEFAULT 0`);
+      log.info("Migration: added access_count column");
+    } catch {
+      // Column already exists
+    }
+
+    this.db.exec(`CREATE INDEX IF NOT EXISTS idx_chunks_last_accessed ON memory_chunks(last_accessed)`);
+
     if (this.vecEnabled) {
       this.db.exec(`
         CREATE VIRTUAL TABLE IF NOT EXISTS vec_chunks USING vec0(
@@ -75,7 +107,7 @@ export class SQLiteStorage implements StorageBackend {
       .prepare("SELECT COUNT(*) as count FROM memory_chunks")
       .get() as { count: number };
     log.info(
-      `Initialized SQLite storage at ${this.dbPath} (${count.count} memories, vec: ${this.vecEnabled})`,
+      `Initialized SQLite storage at ${this.dbPath} (${count.count} memories, vec: ${this.vecEnabled}, decay: ${this.decayConfig.enabled})`,
     );
   }
 
@@ -203,17 +235,69 @@ export class SQLiteStorage implements StorageBackend {
     const bySource: Record<string, number> = {};
     for (const row of sourceRows) bySource[row.source] = row.count;
 
+    // Decay stats
+    const neverAccessed = db
+      .prepare("SELECT COUNT(*) as count FROM memory_chunks WHERE last_accessed IS NULL")
+      .get() as { count: number };
+
+    const avgAccess = db
+      .prepare("SELECT AVG(access_count) as avg FROM memory_chunks")
+      .get() as { avg: number | null };
+
+    let belowThreshold = 0;
+    if (this.decayConfig.enabled) {
+      const allRows = db
+        .prepare("SELECT importance, last_accessed, access_count, timestamp FROM memory_chunks")
+        .all() as Pick<RawChunkRow, "importance" | "last_accessed" | "access_count" | "timestamp">[];
+
+      for (const row of allRows) {
+        const effImp = this.computeEffectiveImportance(
+          row.importance, row.last_accessed, row.access_count ?? 0, row.timestamp,
+        );
+        if (effImp < this.decayConfig.pruneThreshold) belowThreshold++;
+      }
+    }
+
     return {
       totalChunks: total.count,
       byCategory,
       bySource,
       oldestTimestamp: dateRange.oldest,
       newestTimestamp: dateRange.newest,
+      decayStats: {
+        neverAccessed: neverAccessed.count,
+        avgAccessCount: avgAccess.avg ?? 0,
+        belowPruneThreshold: belowThreshold,
+      },
     };
   }
 
   get isVecEnabled(): boolean {
     return this.vecEnabled;
+  }
+
+  computeEffectiveImportance(
+    baseImportance: number,
+    lastAccessed: number | null,
+    accessCount: number,
+    timestamp: number,
+  ): number {
+    if (!this.decayConfig.enabled) return baseImportance;
+
+    const now = Date.now();
+    const referenceTime = lastAccessed ?? timestamp;
+    const ageDays = (now - referenceTime) / (1000 * 60 * 60 * 24);
+
+    // Exponential decay: 0.5 ^ (ageDays / halfLife)
+    const decayFactor = Math.pow(0.5, ageDays / this.decayConfig.halfLifeDays);
+
+    // Logarithmic access boost: capped at accessBoostMax
+    const accessBoost = Math.min(
+      this.decayConfig.accessBoostMax,
+      this.decayConfig.accessBoostRate * Math.log(1 + accessCount),
+    );
+
+    return Math.max(0, Math.min(1, baseImportance * decayFactor + accessBoost));
   }
 
   hybridSearch(
@@ -225,7 +309,10 @@ export class SQLiteStorage implements StorageBackend {
     const keywordResults = this.keywordSearch(query, limit * 3, filters);
 
     if (!queryEmbedding || !this.vecEnabled) {
-      return keywordResults.slice(0, limit);
+      const results = this.applyDecayScoring(keywordResults).slice(0, limit);
+      this.recordAccess(results.map((r) => r.chunk.id));
+      this.maybePrune();
+      return results;
     }
 
     let vectorResults: SearchResult[] = [];
@@ -233,7 +320,10 @@ export class SQLiteStorage implements StorageBackend {
       vectorResults = this.vectorSearch(queryEmbedding, limit * 3, filters);
     } catch (err) {
       log.error("Vector search failed, using keyword-only:", err);
-      return keywordResults.slice(0, limit);
+      const results = this.applyDecayScoring(keywordResults).slice(0, limit);
+      this.recordAccess(results.map((r) => r.chunk.id));
+      this.maybePrune();
+      return results;
     }
 
     // Merge with 70% vector / 30% keyword weighting
@@ -262,14 +352,25 @@ export class SQLiteStorage implements StorageBackend {
 
     const merged: SearchResult[] = [];
     for (const entry of scoreMap.values()) {
+      const relevanceScore = entry.vectorScore * 0.7 + entry.keywordScore * 0.3;
+      const effImp = this.computeEffectiveImportance(
+        entry.chunk.importance,
+        entry.chunk.lastAccessed ?? null,
+        entry.chunk.accessCount ?? 0,
+        entry.chunk.timestamp,
+      );
       merged.push({
         chunk: entry.chunk,
-        score: entry.vectorScore * 0.7 + entry.keywordScore * 0.3,
+        score: relevanceScore * (0.7 + 0.3 * effImp),
+        effectiveImportance: effImp,
       });
     }
 
     merged.sort((a, b) => b.score - a.score);
-    return merged.slice(0, limit);
+    const finalResults = merged.slice(0, limit);
+    this.recordAccess(finalResults.map((r) => r.chunk.id));
+    this.maybePrune();
+    return finalResults;
   }
 
   vectorSearch(
@@ -351,6 +452,85 @@ export class SQLiteStorage implements StorageBackend {
     } catch (err) {
       log.error("FTS5 search failed, falling back to LIKE:", err);
       return this.fallbackSearch(query, limit, filters);
+    }
+  }
+
+  private applyDecayScoring(results: SearchResult[]): SearchResult[] {
+    if (!this.decayConfig.enabled) return results;
+
+    const scored = results.map((r) => {
+      const effImp = this.computeEffectiveImportance(
+        r.chunk.importance,
+        r.chunk.lastAccessed ?? null,
+        r.chunk.accessCount ?? 0,
+        r.chunk.timestamp,
+      );
+      return {
+        chunk: r.chunk,
+        score: r.score * (0.7 + 0.3 * effImp),
+        effectiveImportance: effImp,
+      };
+    });
+    scored.sort((a, b) => b.score - a.score);
+    return scored;
+  }
+
+  private recordAccess(chunkIds: string[]): void {
+    if (chunkIds.length === 0) return;
+    const db = this.getDb();
+    const now = Date.now();
+    const stmt = db.prepare(`
+      UPDATE memory_chunks
+      SET last_accessed = ?, access_count = access_count + 1
+      WHERE id = ?
+    `);
+    const updateAll = db.transaction(() => {
+      for (const id of chunkIds) {
+        stmt.run(now, id);
+      }
+    });
+    updateAll();
+  }
+
+  private maybePrune(): void {
+    if (!this.decayConfig.enabled) return;
+
+    const now = Date.now();
+    if (now - this.lastPruneTime < this.decayConfig.pruneIntervalMs) return;
+    this.lastPruneTime = now;
+
+    const db = this.getDb();
+    const rows = db
+      .prepare("SELECT id, importance, last_accessed, access_count, timestamp FROM memory_chunks")
+      .all() as Pick<RawChunkRow, "id" | "importance" | "last_accessed" | "access_count" | "timestamp">[];
+
+    const toDelete: string[] = [];
+    for (const row of rows) {
+      const effImp = this.computeEffectiveImportance(
+        row.importance, row.last_accessed, row.access_count ?? 0, row.timestamp,
+      );
+      if (effImp < this.decayConfig.pruneThreshold) {
+        toDelete.push(row.id);
+      }
+    }
+
+    if (toDelete.length > 0) {
+      log.info(`Pruning ${toDelete.length} decayed memories`);
+      const delChunk = db.prepare("DELETE FROM memory_chunks WHERE id = ?");
+      const delFts = db.prepare("DELETE FROM fts_chunks WHERE chunk_id = ?");
+      const delVec = this.vecEnabled
+        ? db.prepare("DELETE FROM vec_chunks WHERE chunk_id = ?")
+        : null;
+
+      const doPrune = db.transaction(() => {
+        for (const id of toDelete) {
+          delChunk.run(id);
+          delFts.run(id);
+          delVec?.run(id);
+        }
+      });
+      doPrune();
+      log.info(`Pruned ${toDelete.length} memories`);
     }
   }
 
@@ -455,6 +635,8 @@ export class SQLiteStorage implements StorageBackend {
       tags: JSON.parse(row.tags || "[]"),
       importance: row.importance,
       timestamp: row.timestamp,
+      lastAccessed: row.last_accessed ?? null,
+      accessCount: row.access_count ?? 0,
     };
   }
 
@@ -473,4 +655,6 @@ interface RawChunkRow {
   importance: number;
   timestamp: number;
   created_at: number;
+  last_accessed: number | null;
+  access_count: number;
 }

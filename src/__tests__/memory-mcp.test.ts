@@ -156,7 +156,7 @@ describe("TestEmbeddingProvider", () => {
 
   it("has correct dimensions", () => {
     assert.equal(provider.dimensions, 128);
-    assert.equal(provider.name, "mock");
+    assert.equal(provider.name, "test");
   });
 
   it("generates embedding of correct length", async () => {
@@ -672,6 +672,146 @@ describe("SQLiteStorage", () => {
   });
 });
 
+// ─── Access Tracking & Decay ─────────────────────────────────────────────────
+
+describe("access tracking and decay", () => {
+  let decayStorage: SQLiteStorage;
+  let decayDir: string;
+
+  before(async () => {
+    decayDir = makeTmpDir();
+    decayStorage = new SQLiteStorage(
+      join(decayDir, "decay.db"), 128,
+      { halfLifeDays: 30, enabled: true, pruneThreshold: 0.05, pruneIntervalMs: 0 },
+    );
+    await decayStorage.initialize();
+  });
+
+  after(async () => {
+    await decayStorage.close();
+    rmSync(decayDir, { recursive: true, force: true });
+  });
+
+  it("initializes new memories with null lastAccessed and 0 accessCount", async () => {
+    const chunk = makeChunk({ content: "Decay test memory chunk content" });
+    await decayStorage.addChunk(chunk);
+    const retrieved = await decayStorage.getChunk(chunk.id);
+    assert.ok(retrieved);
+    assert.equal(retrieved.lastAccessed, null);
+    assert.equal(retrieved.accessCount, 0);
+  });
+
+  it("increments accessCount and sets lastAccessed on search", async () => {
+    const chunk = makeChunk({ content: "Searchable decay test unique keyword xylophone" });
+    await decayStorage.addChunk(chunk);
+
+    await decayStorage.search("xylophone", 10);
+    const after1 = await decayStorage.getChunk(chunk.id);
+    assert.ok(after1);
+    assert.equal(after1.accessCount, 1);
+    assert.ok(after1.lastAccessed !== null);
+    assert.ok(after1.lastAccessed! > 0);
+
+    await decayStorage.search("xylophone", 10);
+    const after2 = await decayStorage.getChunk(chunk.id);
+    assert.equal(after2!.accessCount, 2);
+  });
+
+  it("computeEffectiveImportance returns base importance for recent memory", () => {
+    const now = Date.now();
+    const effImp = decayStorage.computeEffectiveImportance(0.5, now, 0, now);
+    assert.ok(effImp > 0.49);
+    assert.ok(effImp <= 0.5);
+  });
+
+  it("computeEffectiveImportance decays over time", () => {
+    const now = Date.now();
+    const thirtyDaysAgo = now - 30 * 24 * 60 * 60 * 1000;
+    const effImp = decayStorage.computeEffectiveImportance(0.5, null, 0, thirtyDaysAgo);
+    // After 1 half-life, importance should be ~0.25
+    assert.ok(effImp > 0.23);
+    assert.ok(effImp < 0.27);
+  });
+
+  it("access count boosts effective importance", () => {
+    const now = Date.now();
+    const thirtyDaysAgo = now - 30 * 24 * 60 * 60 * 1000;
+
+    const withoutAccess = decayStorage.computeEffectiveImportance(0.5, null, 0, thirtyDaysAgo);
+    const withAccess = decayStorage.computeEffectiveImportance(0.5, null, 10, thirtyDaysAgo);
+    assert.ok(withAccess > withoutAccess);
+  });
+
+  it("recent access refreshes the decay clock", () => {
+    const now = Date.now();
+    const thirtyDaysAgo = now - 30 * 24 * 60 * 60 * 1000;
+
+    const oldNeverAccessed = decayStorage.computeEffectiveImportance(0.5, null, 0, thirtyDaysAgo);
+    const oldRecentlyAccessed = decayStorage.computeEffectiveImportance(0.5, now - 1000, 1, thirtyDaysAgo);
+
+    assert.ok(oldRecentlyAccessed > oldNeverAccessed);
+    assert.ok(oldRecentlyAccessed > 0.49);
+  });
+
+  it("prunes memories below threshold", async () => {
+    const veryOld = Date.now() - 365 * 24 * 60 * 60 * 1000;
+    const chunk = makeChunk({
+      content: "Ancient memory that should be pruned test content here",
+      importance: 0.1,
+      timestamp: veryOld,
+    });
+    await decayStorage.addChunk(chunk);
+
+    // Trigger search to run pruning (pruneIntervalMs is 0 so it always runs)
+    await decayStorage.search("unrelated query term", 10);
+
+    const retrieved = await decayStorage.getChunk(chunk.id);
+    assert.equal(retrieved, null, "Very old low-importance memory should be pruned");
+  });
+
+  it("does not prune recently accessed memories", async () => {
+    const veryOld = Date.now() - 365 * 24 * 60 * 60 * 1000;
+    const chunk = makeChunk({
+      content: "Old but accessed memory should survive pruning uniqueword987",
+      importance: 0.5,
+      timestamp: veryOld,
+    });
+    await decayStorage.addChunk(chunk);
+
+    // Access it via search to refresh lastAccessed
+    await decayStorage.search("uniqueword987", 10);
+
+    // Trigger another search to run pruning
+    await decayStorage.search("trigger prune run", 10);
+
+    const retrieved = await decayStorage.getChunk(chunk.id);
+    assert.ok(retrieved, "Recently accessed memory should survive pruning");
+  });
+
+  it("decay can be disabled", async () => {
+    const noDecayDir = makeTmpDir();
+    const noDecayStorage = new SQLiteStorage(
+      join(noDecayDir, "nodecay.db"), 128,
+      { enabled: false },
+    );
+    await noDecayStorage.initialize();
+
+    const effImp = noDecayStorage.computeEffectiveImportance(0.5, null, 0, 0);
+    assert.equal(effImp, 0.5, "Disabled decay should return base importance");
+
+    await noDecayStorage.close();
+    rmSync(noDecayDir, { recursive: true, force: true });
+  });
+
+  it("getStats includes decay stats", async () => {
+    const stats = await decayStorage.getStats();
+    assert.ok(stats.decayStats);
+    assert.ok(typeof stats.decayStats.neverAccessed === "number");
+    assert.ok(typeof stats.decayStats.avgAccessCount === "number");
+    assert.ok(typeof stats.decayStats.belowPruneThreshold === "number");
+  });
+});
+
 // ─── File Watcher ───────────────────────────────────────────────────────────
 
 describe("FileWatcher", () => {
@@ -755,8 +895,21 @@ SQLite with FTS5 for full-text search and sqlite-vec for vector search.`,
 
 // ─── End-to-End: MCP Protocol ──────────────────────────────────────────────
 
+async function isOllamaRunning(): Promise<boolean> {
+  try {
+    const controller = new AbortController();
+    const timeout = setTimeout(() => controller.abort(), 1000);
+    const res = await fetch("http://127.0.0.1:11434/api/tags", { signal: controller.signal });
+    clearTimeout(timeout);
+    return res.ok;
+  } catch {
+    return false;
+  }
+}
+
 describe("MCP Protocol (end-to-end)", () => {
-  it("responds to initialize request", async () => {
+  it("responds to initialize request", async (t) => {
+    if (!(await isOllamaRunning())) return t.skip("Ollama not running");
     const { spawn } = await import("node:child_process");
     const serverPath = new URL("../../dist/index.js", import.meta.url).pathname;
 
@@ -815,7 +968,8 @@ describe("MCP Protocol (end-to-end)", () => {
     assert.ok(parsed.result.capabilities.resources);
   });
 
-  it("lists tools via tools/list", async () => {
+  it("lists tools via tools/list", async (t) => {
+    if (!(await isOllamaRunning())) return t.skip("Ollama not running");
     const { spawn } = await import("node:child_process");
     const serverPath = new URL("../../dist/index.js", import.meta.url).pathname;
 

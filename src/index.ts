@@ -5,6 +5,7 @@ import { StdioServerTransport } from "@modelcontextprotocol/sdk/server/stdio.js"
 import { homedir } from "node:os";
 import { join } from "node:path";
 import { SQLiteStorage } from "./storage/database.js";
+import type { DecayConfig } from "./storage/types.js";
 import { detectEmbeddingProvider } from "./embeddings/detect.js";
 import { LRUEmbeddingCache } from "./embeddings/cache.js";
 import { registerStoreTools } from "./tools/store.js";
@@ -25,7 +26,20 @@ async function main() {
 
   const dbPath =
     process.env.MEMORY_DB_PATH || join(homedir(), ".memory-mcp", "memory.db");
-  const storage = new SQLiteStorage(dbPath, embeddingProvider.dimensions);
+
+  // Decay configuration from environment
+  const decayConfig: Partial<DecayConfig> = {};
+  if (process.env.MEMORY_DECAY_HALF_LIFE_DAYS) {
+    decayConfig.halfLifeDays = Number(process.env.MEMORY_DECAY_HALF_LIFE_DAYS);
+  }
+  if (process.env.MEMORY_DECAY_ENABLED === "false") {
+    decayConfig.enabled = false;
+  }
+  if (process.env.MEMORY_PRUNE_THRESHOLD) {
+    decayConfig.pruneThreshold = Number(process.env.MEMORY_PRUNE_THRESHOLD);
+  }
+
+  const storage = new SQLiteStorage(dbPath, embeddingProvider.dimensions, decayConfig);
   await storage.initialize();
 
   const server = new McpServer({
