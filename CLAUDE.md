@@ -13,7 +13,7 @@ npm run dev      # Run with tsx (dev mode)
 
 - `src/index.ts` — Entry point: McpServer + StdioServerTransport, graceful shutdown
 - `src/storage/` — SQLite + FTS5 + sqlite-vec (types + database)
-- `src/embeddings/` — Multi-provider embedding system (Ollama > OpenAI > Gemini > Mock)
+- `src/embeddings/` — Embedding system (Ollama > Mock fallback)
 - `src/sync/` — File watching with chokidar, markdown chunking
 - `src/tools/` — MCP tool handlers (store, search, list, delete, stats, context)
 - `src/resources/` — MCP resources (memory://stats, memory://recent)

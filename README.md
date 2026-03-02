@@ -5,7 +5,7 @@ Persistent memory MCP server for Claude Code. Store, search, and retrieve memori
 ## Features
 
 - **Hybrid search** — 70% vector similarity + 30% BM25 keyword matching
-- **Multi-provider embeddings** — Ollama (local), OpenAI, Gemini, or mock fallback
+- **Local embeddings** — Ollama (local, free) with mock fallback
 - **Persistent storage** — SQLite database survives across sessions
 - **Token-aware context** — Retrieve memories fitted within a token budget
 - **File watching** — Auto-index markdown and code files on change
@@ -62,16 +62,12 @@ All configuration is via environment variables:
 | `MEMORY_DB_PATH` | `~/.memory-mcp/memory.db` | Database file location |
 | `MEMORY_WATCH_PATHS` | *(empty)* | Comma-separated file paths to auto-index |
 | `OLLAMA_URL` | `http://127.0.0.1:11434` | Ollama server URL |
-| `OPENAI_API_KEY` | — | OpenAI API key for embeddings |
-| `GEMINI_API_KEY` | — | Gemini API key for embeddings |
 | `DEBUG` | — | Enable debug logging |
 
 ### Embedding Provider Priority
 
 1. **Ollama** (local, free) — auto-detected if running
-2. **OpenAI** — if `OPENAI_API_KEY` set
-3. **Gemini** — if `GEMINI_API_KEY` set
-4. **Mock** — deterministic fallback, keyword search still works
+2. **Mock** — deterministic fallback, keyword search still works
 
 ## Architecture
 
@@ -82,7 +78,7 @@ src/
 │   ├── types.ts          # MemoryChunk, SearchResult, StorageBackend
 │   └── database.ts       # SQLite + FTS5 + sqlite-vec
 ├── embeddings/
-│   ├── providers.ts      # Ollama, OpenAI, Gemini, Mock
+│   ├── providers.ts      # Ollama, Mock
 │   ├── cache.ts          # LRU embedding cache
 │   └── detect.ts         # Auto-detect best provider
 ├── sync/

@@ -40,75 +40,6 @@ export class OllamaEmbeddingProvider implements EmbeddingProvider {
   }
 }
 
-export class OpenAIEmbeddingProvider implements EmbeddingProvider {
-  name = "openai";
-  dimensions = 1536;
-
-  constructor(
-    private apiKey: string,
-    private model: string = "text-embedding-3-small",
-  ) {}
-
-  async generateEmbedding(text: string): Promise<Float32Array> {
-    const [result] = await this.generateEmbeddings([text]);
-    return result;
-  }
-
-  async generateEmbeddings(texts: string[]): Promise<Float32Array[]> {
-    const response = await fetch("https://api.openai.com/v1/embeddings", {
-      method: "POST",
-      headers: {
-        Authorization: `Bearer ${this.apiKey}`,
-        "Content-Type": "application/json",
-      },
-      body: JSON.stringify({ model: this.model, input: texts }),
-    });
-
-    if (!response.ok) {
-      throw new Error(`OpenAI embed failed: ${response.status} ${response.statusText}`);
-    }
-
-    const data = (await response.json()) as {
-      data: { embedding: number[] }[];
-    };
-    return data.data.map((d) => new Float32Array(d.embedding));
-  }
-}
-
-export class GeminiEmbeddingProvider implements EmbeddingProvider {
-  name = "gemini";
-  dimensions = 768;
-
-  constructor(
-    private apiKey: string,
-    private model: string = "embedding-001",
-  ) {}
-
-  async generateEmbedding(text: string): Promise<Float32Array> {
-    const url = `https://generativelanguage.googleapis.com/v1beta/models/${this.model}:embedContent?key=${this.apiKey}`;
-    const response = await fetch(url, {
-      method: "POST",
-      headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({
-        content: { parts: [{ text }] },
-      }),
-    });
-
-    if (!response.ok) {
-      throw new Error(`Gemini embed failed: ${response.status} ${response.statusText}`);
-    }
-
-    const data = (await response.json()) as {
-      embedding: { values: number[] };
-    };
-    return new Float32Array(data.embedding.values);
-  }
-
-  async generateEmbeddings(texts: string[]): Promise<Float32Array[]> {
-    return Promise.all(texts.map((t) => this.generateEmbedding(t)));
-  }
-}
-
 export class MockEmbeddingProvider implements EmbeddingProvider {
   name = "mock";
   dimensions = 128;
@@ -147,12 +78,6 @@ export function createEmbeddingProvider(
         config?.model || "nomic-embed-text",
         parseInt(config?.dimensions || "768", 10),
       );
-    case "openai":
-      if (!config?.apiKey) throw new Error("OpenAI API key required");
-      return new OpenAIEmbeddingProvider(config.apiKey, config.model);
-    case "gemini":
-      if (!config?.apiKey) throw new Error("Gemini API key required");
-      return new GeminiEmbeddingProvider(config.apiKey, config.model);
     case "mock":
       return new MockEmbeddingProvider();
     default:
