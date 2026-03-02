@@ -2,8 +2,6 @@ import { log } from "../utils/logger.js";
 import {
   type EmbeddingProvider,
   OllamaEmbeddingProvider,
-  OpenAIEmbeddingProvider,
-  GeminiEmbeddingProvider,
   MockEmbeddingProvider,
 } from "./providers.js";
 
@@ -46,19 +44,7 @@ export async function detectEmbeddingProvider(): Promise<EmbeddingProvider> {
     // Ollama not available
   }
 
-  // 2. Try OpenAI
-  if (process.env.OPENAI_API_KEY) {
-    log.info("Using OpenAI embedding: text-embedding-3-small (1536d)");
-    return new OpenAIEmbeddingProvider(process.env.OPENAI_API_KEY);
-  }
-
-  // 3. Try Gemini
-  if (process.env.GEMINI_API_KEY) {
-    log.info("Using Gemini embedding: embedding-001 (768d)");
-    return new GeminiEmbeddingProvider(process.env.GEMINI_API_KEY);
-  }
-
-  // 4. Mock fallback (keyword-only search still works)
+  // 2. Mock fallback (keyword-only search still works)
   log.info("No embedding provider found — using mock (keyword search only)");
   return new MockEmbeddingProvider();
 }
