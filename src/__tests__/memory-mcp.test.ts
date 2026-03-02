@@ -7,8 +7,34 @@ import { setTimeout as sleep } from "node:timers/promises";
 
 import { SQLiteStorage } from "../storage/database.js";
 import type { MemoryChunk } from "../storage/types.js";
-import { MockEmbeddingProvider } from "../embeddings/providers.js";
+import type { EmbeddingProvider } from "../embeddings/providers.js";
 import { LRUEmbeddingCache } from "../embeddings/cache.js";
+
+// Test-only embedding provider (not used in production)
+class TestEmbeddingProvider implements EmbeddingProvider {
+  name = "test";
+  dimensions = 128;
+
+  async generateEmbedding(text: string): Promise<Float32Array> {
+    const embedding = new Float32Array(this.dimensions);
+    let hash = 0;
+    for (let i = 0; i < text.length; i++) {
+      hash = (hash * 31 + text.charCodeAt(i)) | 0;
+    }
+    for (let i = 0; i < this.dimensions; i++) {
+      embedding[i] = Math.sin(hash + i * 0.1) * 0.5;
+    }
+    let norm = 0;
+    for (let i = 0; i < this.dimensions; i++) norm += embedding[i] ** 2;
+    norm = Math.sqrt(norm) || 1;
+    for (let i = 0; i < this.dimensions; i++) embedding[i] /= norm;
+    return embedding;
+  }
+
+  async generateEmbeddings(texts: string[]): Promise<Float32Array[]> {
+    return Promise.all(texts.map((t) => this.generateEmbedding(t)));
+  }
+}
 import { chunkContent, classifyFile } from "../sync/chunker.js";
 import { FileWatcher } from "../sync/file-watcher.js";
 import { estimateTokens } from "../utils/tokens.js";
@@ -125,8 +151,8 @@ describe("LRUEmbeddingCache", () => {
 
 // ─── Mock Embedding Provider ────────────────────────────────────────────────
 
-describe("MockEmbeddingProvider", () => {
-  const provider = new MockEmbeddingProvider();
+describe("TestEmbeddingProvider", () => {
+  const provider = new TestEmbeddingProvider();
 
   it("has correct dimensions", () => {
     assert.equal(provider.dimensions, 128);
@@ -342,7 +368,7 @@ describe("SQLiteStorage", () => {
     });
 
     it("stores chunks with embeddings", async () => {
-      const provider = new MockEmbeddingProvider();
+      const provider = new TestEmbeddingProvider();
       const chunk = makeChunk({ content: "Chunk with embedding data" });
       const embedding = await provider.generateEmbedding(chunk.content);
 
@@ -496,7 +522,7 @@ describe("SQLiteStorage", () => {
   describe("vector search", () => {
     let vecStorage: SQLiteStorage;
     let vecDir: string;
-    const provider = new MockEmbeddingProvider();
+    const provider = new TestEmbeddingProvider();
 
     before(async () => {
       vecDir = makeTmpDir();

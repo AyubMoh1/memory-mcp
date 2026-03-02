@@ -5,7 +5,7 @@ Persistent memory MCP server for Claude Code. Store, search, and retrieve memori
 ## Features
 
 - **Hybrid search** — 70% vector similarity + 30% BM25 keyword matching
-- **Local embeddings** — Ollama (local, free) with mock fallback
+- **Local embeddings** — Ollama (required, local, free)
 - **Persistent storage** — SQLite database survives across sessions
 - **Token-aware context** — Retrieve memories fitted within a token budget
 - **File watching** — Auto-index markdown and code files on change
@@ -64,10 +64,14 @@ All configuration is via environment variables:
 | `OLLAMA_URL` | `http://127.0.0.1:11434` | Ollama server URL |
 | `DEBUG` | — | Enable debug logging |
 
-### Embedding Provider Priority
+### Embeddings
 
-1. **Ollama** (local, free) — auto-detected if running
-2. **Mock** — deterministic fallback, keyword search still works
+Ollama is **required**. The server will fail to start without a running Ollama instance and an embedding model installed.
+
+```bash
+ollama serve                    # Start Ollama
+ollama pull nomic-embed-text    # Install embedding model
+```
 
 ## Architecture
 
@@ -78,9 +82,9 @@ src/
 │   ├── types.ts          # MemoryChunk, SearchResult, StorageBackend
 │   └── database.ts       # SQLite + FTS5 + sqlite-vec
 ├── embeddings/
-│   ├── providers.ts      # Ollama, Mock
+│   ├── providers.ts      # Ollama embedding provider
 │   ├── cache.ts          # LRU embedding cache
-│   └── detect.ts         # Auto-detect best provider
+│   └── detect.ts         # Detect Ollama + embedding model
 ├── sync/
 │   ├── file-watcher.ts   # chokidar with debouncing
 │   └── chunker.ts        # Split files by headers/paragraphs

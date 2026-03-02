@@ -2,11 +2,9 @@ import { log } from "../utils/logger.js";
 import {
   type EmbeddingProvider,
   OllamaEmbeddingProvider,
-  MockEmbeddingProvider,
 } from "./providers.js";
 
 export async function detectEmbeddingProvider(): Promise<EmbeddingProvider> {
-  // 1. Try Ollama (local, free)
   const ollamaUrl = process.env.OLLAMA_URL || "http://127.0.0.1:11434";
   try {
     const controller = new AbortController();
@@ -22,7 +20,6 @@ export async function detectEmbeddingProvider(): Promise<EmbeddingProvider> {
         models?: { name: string }[];
       };
 
-      // Check for embedding models
       const models = data.models || [];
       const embeddingModels = [
         { name: "nomic-embed-text", dimensions: 768 },
@@ -38,13 +35,18 @@ export async function detectEmbeddingProvider(): Promise<EmbeddingProvider> {
         }
       }
 
-      log.info("Ollama running but no embedding models found");
+      throw new Error(
+        "Ollama is running but no embedding model found. Install one with: ollama pull nomic-embed-text",
+      );
     }
-  } catch {
-    // Ollama not available
-  }
 
-  // 2. Mock fallback (keyword-only search still works)
-  log.info("No embedding provider found — using mock (keyword search only)");
-  return new MockEmbeddingProvider();
+    throw new Error(`Ollama responded with status ${response.status}`);
+  } catch (error) {
+    if (error instanceof Error && error.message.startsWith("Ollama")) {
+      throw error;
+    }
+    throw new Error(
+      `Ollama is required but not reachable at ${ollamaUrl}. Start it with: ollama serve`,
+    );
+  }
 }

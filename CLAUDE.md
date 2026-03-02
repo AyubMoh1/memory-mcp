@@ -13,7 +13,7 @@ npm run dev      # Run with tsx (dev mode)
 
 - `src/index.ts` — Entry point: McpServer + StdioServerTransport, graceful shutdown
 - `src/storage/` — SQLite + FTS5 + sqlite-vec (types + database)
-- `src/embeddings/` — Embedding system (Ollama > Mock fallback)
+- `src/embeddings/` — Ollama embedding provider (required)
 - `src/sync/` — File watching with chokidar, markdown chunking
 - `src/tools/` — MCP tool handlers (store, search, list, delete, stats, context)
 - `src/resources/` — MCP resources (memory://stats, memory://recent)
@@ -30,4 +30,4 @@ npm run dev      # Run with tsx (dev mode)
 - **NEVER use console.log** — it corrupts the stdio MCP transport. Use `log.info()` / `log.error()` from `utils/logger.ts` (writes to stderr).
 - All tool handlers are in separate files exporting a `register*` function.
 - Storage implements the `StorageBackend` interface from `storage/types.ts`.
-- Embedding provider auto-detected on startup. Mock fallback ensures keyword search always works.
+- Ollama is required for embeddings. The server will fail to start without it.
