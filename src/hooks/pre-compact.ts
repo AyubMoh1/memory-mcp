@@ -4,6 +4,7 @@ import { readFileSync, writeFileSync, existsSync, mkdirSync } from "node:fs";
 import { join } from "node:path";
 import { homedir } from "node:os";
 import { createHash } from "node:crypto";
+import { execSync } from "node:child_process";
 import { parseTranscript } from "./transcript.js";
 import { summarizeConversation } from "./summarizer.js";
 import { SQLiteStorage } from "../storage/database.js";
@@ -20,6 +21,17 @@ interface HookInput {
 const STATE_DIR = join(homedir(), ".memory-mcp");
 const STATE_FILE = join(STATE_DIR, "compact-state.json");
 const MAX_RAW_MESSAGES = 20;
+
+function getProjectPath(): string {
+  try {
+    return execSync("git rev-parse --show-toplevel", {
+      encoding: "utf-8",
+      stdio: ["pipe", "pipe", "pipe"],
+    }).trim();
+  } catch {
+    return process.cwd();
+  }
+}
 
 function readState(): Record<string, string> {
   try {
@@ -59,6 +71,9 @@ async function main() {
     log.error("No transcript_path in hook input");
     process.exit(0);
   }
+
+  const projectPath = getProjectPath();
+  const projectTag = `project:${projectPath}`;
 
   // Parse transcript
   let messages;
@@ -114,7 +129,7 @@ async function main() {
         content: `[Session Summary] ${summary}`,
         source: "system",
         category: "conversation",
-        tags: ["auto-compact", "summary", input.session_id],
+        tags: ["auto-compact", "summary", input.session_id, projectTag],
         importance: 0.8,
         timestamp: Date.now(),
       };
@@ -143,7 +158,7 @@ async function main() {
       content: `[${msg.role}] ${msg.content}`,
       source: msg.role === "user" ? "user_message" : "assistant_message",
       category: "conversation",
-      tags: ["auto-compact", "raw", input.session_id],
+      tags: ["auto-compact", "raw", input.session_id, projectTag],
       importance: 0.5,
       timestamp: Date.now(),
     };
