@@ -5,6 +5,7 @@ import type {
   MemoryCategory,
   MemorySource,
 } from "../storage/types.js";
+import { recordEvent } from "../telemetry/events.js";
 
 export function registerListTools(
   server: McpServer,
@@ -52,10 +53,13 @@ export function registerListTools(
       },
     },
     async (input) => {
+      const start = Date.now();
       const chunks = await storage.list(input.limit ?? 20, input.offset ?? 0, {
         category: input.category as MemoryCategory | undefined,
         source: input.source as MemorySource | undefined,
       });
+
+      recordEvent("tool_call", { tool_name: "memory_list", latency_ms: Date.now() - start, success: true, metadata: { results: chunks.length } });
 
       if (chunks.length === 0) {
         return {

@@ -2,6 +2,7 @@ import { z } from "zod";
 import type { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
 import type { StorageBackend, MemoryCategory, MemorySource } from "../storage/types.js";
 import { generateId } from "../utils/id.js";
+import { recordEvent } from "../telemetry/events.js";
 import { log } from "../utils/logger.js";
 
 export function registerStoreTools(
@@ -51,6 +52,7 @@ export function registerStoreTools(
       },
     },
     async (input) => {
+      const start = Date.now();
       let embedding: Float32Array | undefined;
       try {
         embedding = await getEmbedding(input.content);
@@ -72,6 +74,7 @@ export function registerStoreTools(
       );
 
       log.debug("Stored memory:", chunk.id);
+      recordEvent("tool_call", { tool_name: "memory_store", latency_ms: Date.now() - start, success: true, metadata: { category: chunk.category } });
 
       return {
         content: [

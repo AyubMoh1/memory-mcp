@@ -2,6 +2,7 @@ import { z } from "zod";
 import type { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
 import type { StorageBackend, MemoryCategory } from "../storage/types.js";
 import { estimateTokens } from "../utils/tokens.js";
+import { recordEvent } from "../telemetry/events.js";
 import { log } from "../utils/logger.js";
 
 export function registerContextTools(
@@ -39,6 +40,7 @@ export function registerContextTools(
       },
     },
     async (input) => {
+      const start = Date.now();
       const budget = input.token_budget ?? 4000;
 
       let queryEmbedding: Float32Array | undefined;
@@ -70,6 +72,8 @@ export function registerContextTools(
         tokenCount += tokens;
         fitted.push(entry);
       }
+
+      recordEvent("tool_call", { tool_name: "memory_get_context", latency_ms: Date.now() - start, success: true, metadata: { results: fitted.length, tokens: tokenCount } });
 
       if (fitted.length === 0) {
         return {

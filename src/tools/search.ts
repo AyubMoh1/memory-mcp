@@ -1,6 +1,7 @@
 import { z } from "zod";
 import type { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
 import type { StorageBackend, MemoryCategory } from "../storage/types.js";
+import { recordEvent } from "../telemetry/events.js";
 import { log } from "../utils/logger.js";
 
 export function registerSearchTools(
@@ -46,6 +47,7 @@ export function registerSearchTools(
       },
     },
     async (input) => {
+      const start = Date.now();
       let queryEmbedding: Float32Array | undefined;
       try {
         queryEmbedding = await getEmbedding(input.query);
@@ -63,6 +65,8 @@ export function registerSearchTools(
         },
         queryEmbedding,
       );
+
+      recordEvent("tool_call", { tool_name: "memory_search", latency_ms: Date.now() - start, success: true, metadata: { results: results.length } });
 
       if (results.length === 0) {
         return {

@@ -1,5 +1,6 @@
 import type { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
 import type { StorageBackend } from "../storage/types.js";
+import { recordEvent } from "../telemetry/events.js";
 
 export function registerStatsTools(
   server: McpServer,
@@ -14,6 +15,7 @@ export function registerStatsTools(
       inputSchema: {},
     },
     async () => {
+      const start = Date.now();
       const stats = await storage.getStats();
 
       const lines: string[] = [
@@ -47,6 +49,8 @@ export function registerStatsTools(
           `  Below prune threshold: ${stats.decayStats.belowPruneThreshold}`,
         );
       }
+
+      recordEvent("tool_call", { tool_name: "memory_get_stats", latency_ms: Date.now() - start, success: true });
 
       return {
         content: [{ type: "text" as const, text: lines.join("\n") }],
