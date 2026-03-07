@@ -17,6 +17,7 @@ import { registerContextTools } from "./tools/context.js";
 import { registerStatsResource } from "./resources/stats.js";
 import { registerRecentResource } from "./resources/recent.js";
 import { FileWatcher } from "./sync/file-watcher.js";
+import { initTelemetry, recordEvent } from "./telemetry/events.js";
 import { log } from "./utils/logger.js";
 
 async function main() {
@@ -41,6 +42,9 @@ async function main() {
 
   const storage = new SQLiteStorage(dbPath, embeddingProvider.dimensions, decayConfig);
   await storage.initialize();
+
+  // Telemetry
+  const telemetry = initTelemetry(dbPath);
 
   const server = new McpServer({
     name: "memory-mcp",
@@ -81,6 +85,7 @@ async function main() {
   const shutdown = async () => {
     log.info("Shutting down...");
     await fileWatcher.stop();
+    telemetry.close();
     await storage.close();
     process.exit(0);
   };

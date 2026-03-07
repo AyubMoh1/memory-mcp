@@ -1,0 +1,158 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>Memory MCP Dashboard</title>
+  <link rel="stylesheet" href="/styles.css">
+  <script src="https://cdn.jsdelivr.net/npm/chart.js@4.4.7/dist/chart.umd.min.js"></script>
+</head>
+<body>
+  <div class="app">
+    <aside class="sidebar">
+      <div class="sidebar-header">
+        <h1><span class="icon"></span> Memory MCP</h1>
+        <p>Persistent memory dashboard</p>
+      </div>
+
+      <div class="sidebar-section">
+        <div class="sidebar-section-title">Projects</div>
+        <ul class="project-list" id="project-list">
+          <li class="project-item active" data-project="">
+            All Projects
+            <span class="count" id="total-count">-</span>
+          </li>
+        </ul>
+      </div>
+    </aside>
+
+    <main class="main">
+      <div class="page-header">
+        <div>
+          <h2 id="page-title">All Projects</h2>
+          <div class="subtitle" id="page-subtitle">Overview of all stored memories</div>
+        </div>
+        <button class="refresh-btn" onclick="refreshAll()">Refresh</button>
+      </div>
+
+      <!-- Tabs -->
+      <div class="tabs">
+        <div class="tab active" data-tab="overview" onclick="switchTab('overview')">Overview</div>
+        <div class="tab" data-tab="memories" onclick="switchTab('memories')">Memories</div>
+        <div class="tab" data-tab="decay" onclick="switchTab('decay')">Decay</div>
+        <div class="tab" data-tab="telemetry" onclick="switchTab('telemetry')">Activity</div>
+      </div>
+
+      <!-- Overview Tab -->
+      <div id="tab-overview">
+        <div class="cards" id="overview-cards"></div>
+
+        <div class="chart-grid">
+          <div class="chart-panel full-width">
+            <h3>Memory Timeline (Last 30 Days)</h3>
+            <div class="chart-container">
+              <canvas id="timeline-chart"></canvas>
+            </div>
+          </div>
+          <div class="chart-panel">
+            <h3>By Category</h3>
+            <div class="chart-container">
+              <canvas id="category-chart"></canvas>
+            </div>
+          </div>
+          <div class="chart-panel">
+            <h3>By Source</h3>
+            <div class="chart-container">
+              <canvas id="source-chart"></canvas>
+            </div>
+          </div>
+        </div>
+
+        <!-- Project comparison (only in All Projects view) -->
+        <div id="project-comparison" class="chart-panel" style="margin-bottom: 24px; display: none;">
+          <h3>Memories per Project</h3>
+          <div class="chart-container">
+            <canvas id="project-chart"></canvas>
+          </div>
+        </div>
+      </div>
+
+      <!-- Memories Tab -->
+      <div id="tab-memories" style="display: none;">
+        <div class="table-panel">
+          <h3>Stored Memories</h3>
+          <div class="table-controls">
+            <select id="mem-category-filter" onchange="loadMemories()">
+              <option value="">All Categories</option>
+              <option value="fact">Fact</option>
+              <option value="preference">Preference</option>
+              <option value="decision">Decision</option>
+              <option value="code_pattern">Code Pattern</option>
+              <option value="error">Error</option>
+              <option value="conversation">Conversation</option>
+            </select>
+            <select id="mem-sort" onchange="loadMemories()">
+              <option value="timestamp">Recent First</option>
+              <option value="importance">Importance</option>
+              <option value="access_count">Most Accessed</option>
+            </select>
+          </div>
+          <div id="memories-table"></div>
+          <div class="pagination" id="memories-pagination"></div>
+        </div>
+      </div>
+
+      <!-- Decay Tab -->
+      <div id="tab-decay" style="display: none;">
+        <div class="chart-panel" style="margin-bottom: 24px;">
+          <h3>Effective Importance vs Age</h3>
+          <p style="font-size: 12px; color: var(--text-muted); margin-bottom: 12px;">
+            Each dot is a memory. Below the red line (0.05) = will be pruned. Color = category.
+          </p>
+          <div class="chart-container" style="height: 400px;">
+            <canvas id="decay-scatter"></canvas>
+          </div>
+        </div>
+
+        <div class="table-panel">
+          <h3>Most Accessed Memories</h3>
+          <div id="top-accessed-table"></div>
+        </div>
+      </div>
+
+      <!-- Telemetry Tab -->
+      <div id="tab-telemetry" style="display: none;">
+        <div class="cards" id="telemetry-cards"></div>
+
+        <div class="chart-grid">
+          <div class="chart-panel full-width">
+            <h3>Tool Activity (Last 7 Days)</h3>
+            <div class="chart-container">
+              <canvas id="telemetry-timeline"></canvas>
+            </div>
+          </div>
+          <div class="chart-panel">
+            <h3>Tool Usage</h3>
+            <div class="chart-container">
+              <canvas id="tool-usage-chart"></canvas>
+            </div>
+          </div>
+          <div class="chart-panel">
+            <h3>Average Latency (ms)</h3>
+            <div class="chart-container">
+              <canvas id="tool-latency-chart"></canvas>
+            </div>
+          </div>
+        </div>
+
+        <div class="table-panel">
+          <h3>Recent Events</h3>
+          <div id="telemetry-table"></div>
+        </div>
+      </div>
+    </main>
+  </div>
+
+  <script src="/app.js"></script>
+</body>
+</html>

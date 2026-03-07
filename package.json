@@ -10,10 +10,12 @@
     "dist"
   ],
   "scripts": {
-    "build": "tsc && chmod 755 dist/index.js",
+    "build": "tsc && chmod 755 dist/index.js && cp -r src/dashboard/public dist/dashboard/public",
     "dev": "tsx src/index.ts",
     "watch": "tsc --watch",
-    "test": "tsx --test src/__tests__/*.test.ts"
+    "test": "tsx --test src/__tests__/*.test.ts",
+    "dashboard": "tsx src/dashboard/server.ts",
+    "dashboard:build": "tsc && chmod 755 dist/dashboard/server.js"
   },
   "dependencies": {
     "@modelcontextprotocol/sdk": "^1.27.0",
