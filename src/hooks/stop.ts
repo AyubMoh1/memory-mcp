@@ -14,6 +14,7 @@ import { createHash } from "node:crypto";
 import { execSync } from "node:child_process";
 import { parseTranscript } from "./transcript.js";
 import { summarizeConversation } from "./summarizer.js";
+import { scoreMessageImportance, inferCategory } from "./importance.js";
 import { SQLiteStorage } from "../storage/database.js";
 import { detectEmbeddingProvider } from "../embeddings/detect.js";
 import { generateId } from "../utils/id.js";
@@ -168,16 +169,18 @@ async function main() {
     }
   }
 
-  // Store recent raw messages
+  // Store recent raw messages with content-aware importance
   const recentMessages = messages.slice(-MAX_RAW_MESSAGES);
   for (const msg of recentMessages) {
+    const importance = scoreMessageImportance(msg.content, msg.role);
+    const category = inferCategory(msg.content);
     const chunk: MemoryChunk = {
       id: generateId(),
       content: `[${msg.role}] ${msg.content}`,
       source: msg.role === "user" ? "user_message" : "assistant_message",
-      category: "conversation",
+      category,
       tags: ["auto-stop", "raw", input.session_id, projectTag],
-      importance: 0.4,
+      importance,
       timestamp: Date.now(),
     };
 
