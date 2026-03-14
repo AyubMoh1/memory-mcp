@@ -6,7 +6,7 @@ import { homedir } from "node:os";
 import { createHash } from "node:crypto";
 import { execSync } from "node:child_process";
 import { parseTranscript } from "./transcript.js";
-import { summarizeConversation } from "./summarizer.js";
+import { extractKnowledge } from "./summarizer.js";
 import { scoreMessageImportance, inferCategory } from "./importance.js";
 import { SQLiteStorage } from "../storage/database.js";
 import { detectEmbeddingProvider } from "../embeddings/detect.js";
@@ -121,13 +121,14 @@ async function main() {
 
   const chunksToStore: { chunk: MemoryChunk; embedding?: Float32Array }[] = [];
 
-  // Generate summary
+  // Extract knowledge and generate summary
   try {
-    const summary = await summarizeConversation(messages);
-    if (summary) {
+    const result = await extractKnowledge(messages);
+
+    if (result.summary) {
       const chunk: MemoryChunk = {
         id: generateId(),
-        content: `[Session Summary] ${summary}`,
+        content: `[Session Summary] ${result.summary}`,
         source: "system",
         category: "conversation",
         tags: ["auto-compact", "summary", input.session_id, projectTag],
@@ -145,10 +146,38 @@ async function main() {
       }
 
       chunksToStore.push({ chunk, embedding });
-      log.info(`Summary generated (${summary.length} chars)`);
+      log.info(`Summary generated (${result.summary.length} chars)`);
+    }
+
+    // Store extracted knowledge items
+    for (const item of result.extracted) {
+      const chunk: MemoryChunk = {
+        id: generateId(),
+        content: item.content,
+        source: "system",
+        category: item.category,
+        tags: ["auto-compact", "extracted", input.session_id, projectTag],
+        importance: item.importance,
+        timestamp: Date.now(),
+      };
+
+      let embedding: Float32Array | undefined;
+      if (embeddingProvider) {
+        try {
+          embedding = await embeddingProvider.generateEmbedding(chunk.content);
+        } catch (err) {
+          log.error("Failed to embed extracted item:", err);
+        }
+      }
+
+      chunksToStore.push({ chunk, embedding });
+    }
+
+    if (result.extracted.length > 0) {
+      log.info(`Extracted ${result.extracted.length} knowledge items`);
     }
   } catch (err) {
-    log.error("Failed to generate summary:", err);
+    log.error("Failed to extract knowledge:", err);
   }
 
   // Store recent raw messages with content-aware importance

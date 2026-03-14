@@ -13,7 +13,7 @@ import { homedir } from "node:os";
 import { createHash } from "node:crypto";
 import { execSync } from "node:child_process";
 import { parseTranscript } from "./transcript.js";
-import { summarizeConversation } from "./summarizer.js";
+import { extractKnowledge } from "./summarizer.js";
 import { scoreMessageImportance, inferCategory } from "./importance.js";
 import { SQLiteStorage } from "../storage/database.js";
 import { detectEmbeddingProvider } from "../embeddings/detect.js";
@@ -137,14 +137,16 @@ async function main() {
 
   const chunksToStore: { chunk: MemoryChunk; embedding?: Float32Array }[] = [];
 
-  // For sessions with enough messages, generate a summary
+  // For sessions with enough messages, extract knowledge and generate summary
   if (messages.length >= 4) {
     try {
-      const summary = await summarizeConversation(messages);
-      if (summary) {
+      const result = await extractKnowledge(messages);
+
+      // Store the summary
+      if (result.summary) {
         const chunk: MemoryChunk = {
           id: generateId(),
-          content: `[Session Summary] ${summary}`,
+          content: `[Session Summary] ${result.summary}`,
           source: "system",
           category: "conversation",
           tags: ["auto-stop", "summary", input.session_id, projectTag],
@@ -162,10 +164,38 @@ async function main() {
         }
 
         chunksToStore.push({ chunk, embedding });
-        log.info(`Stop hook: summary generated (${summary.length} chars)`);
+        log.info(`Stop hook: summary generated (${result.summary.length} chars)`);
+      }
+
+      // Store extracted knowledge items with proper categories
+      for (const item of result.extracted) {
+        const chunk: MemoryChunk = {
+          id: generateId(),
+          content: item.content,
+          source: "system",
+          category: item.category,
+          tags: ["auto-stop", "extracted", input.session_id, projectTag],
+          importance: item.importance,
+          timestamp: Date.now(),
+        };
+
+        let embedding: Float32Array | undefined;
+        if (embeddingProvider) {
+          try {
+            embedding = await embeddingProvider.generateEmbedding(chunk.content);
+          } catch (err) {
+            log.error("Stop hook: failed to embed extracted item:", err);
+          }
+        }
+
+        chunksToStore.push({ chunk, embedding });
+      }
+
+      if (result.extracted.length > 0) {
+        log.info(`Stop hook: extracted ${result.extracted.length} knowledge items`);
       }
     } catch (err) {
-      log.error("Stop hook: summarization failed:", err);
+      log.error("Stop hook: knowledge extraction failed:", err);
     }
   }
 
