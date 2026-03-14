@@ -61,6 +61,7 @@ async function main() {
         chunk.lastAccessed ?? null,
         chunk.accessCount ?? 0,
         chunk.timestamp,
+        chunk.category,
       ),
       isSummary: chunk.tags.includes("summary"),
     }));

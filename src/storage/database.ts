@@ -15,12 +15,23 @@ import type {
 } from "./types.js";
 
 const DEFAULT_DECAY_CONFIG: DecayConfig = {
-  halfLifeDays: 30,
-  accessBoostMax: 0.20,
-  accessBoostRate: 0.05,
-  pruneThreshold: 0.05,
+  halfLifeDays: 14,
+  accessBoostMax: 0.25,
+  accessBoostRate: 0.08,
+  pruneThreshold: 0.10,
   pruneIntervalMs: 3600000, // 60 minutes
   enabled: true,
+};
+
+// Category-specific half-life multipliers
+// Higher = slower decay (more persistent)
+const CATEGORY_HALF_LIFE_MULTIPLIER: Record<string, number> = {
+  fact: 3.0,        // 42 days — facts are long-lived
+  decision: 2.5,    // 35 days — decisions stay relevant
+  preference: 3.0,  // 42 days — user preferences persist
+  error: 2.0,       // 28 days — errors are useful for a while
+  code_pattern: 2.5, // 35 days — patterns stay relevant
+  conversation: 1.0, // 14 days — raw conversation decays fastest
 };
 
 export class SQLiteStorage implements StorageBackend {
@@ -247,12 +258,12 @@ export class SQLiteStorage implements StorageBackend {
     let belowThreshold = 0;
     if (this.decayConfig.enabled) {
       const allRows = db
-        .prepare("SELECT importance, last_accessed, access_count, timestamp FROM memory_chunks")
-        .all() as Pick<RawChunkRow, "importance" | "last_accessed" | "access_count" | "timestamp">[];
+        .prepare("SELECT importance, last_accessed, access_count, timestamp, category FROM memory_chunks")
+        .all() as Pick<RawChunkRow, "importance" | "last_accessed" | "access_count" | "timestamp" | "category">[];
 
       for (const row of allRows) {
         const effImp = this.computeEffectiveImportance(
-          row.importance, row.last_accessed, row.access_count ?? 0, row.timestamp,
+          row.importance, row.last_accessed, row.access_count ?? 0, row.timestamp, row.category,
         );
         if (effImp < this.decayConfig.pruneThreshold) belowThreshold++;
       }
@@ -281,6 +292,7 @@ export class SQLiteStorage implements StorageBackend {
     lastAccessed: number | null,
     accessCount: number,
     timestamp: number,
+    category?: string,
   ): number {
     if (!this.decayConfig.enabled) return baseImportance;
 
@@ -288,8 +300,12 @@ export class SQLiteStorage implements StorageBackend {
     const referenceTime = lastAccessed ?? timestamp;
     const ageDays = (now - referenceTime) / (1000 * 60 * 60 * 24);
 
+    // Category-aware half-life
+    const multiplier = CATEGORY_HALF_LIFE_MULTIPLIER[category ?? "conversation"] ?? 1.0;
+    const effectiveHalfLife = this.decayConfig.halfLifeDays * multiplier;
+
     // Exponential decay: 0.5 ^ (ageDays / halfLife)
-    const decayFactor = Math.pow(0.5, ageDays / this.decayConfig.halfLifeDays);
+    const decayFactor = Math.pow(0.5, ageDays / effectiveHalfLife);
 
     // Logarithmic access boost: capped at accessBoostMax
     const accessBoost = Math.min(
@@ -358,6 +374,7 @@ export class SQLiteStorage implements StorageBackend {
         entry.chunk.lastAccessed ?? null,
         entry.chunk.accessCount ?? 0,
         entry.chunk.timestamp,
+        entry.chunk.category,
       );
       merged.push({
         chunk: entry.chunk,
@@ -464,6 +481,7 @@ export class SQLiteStorage implements StorageBackend {
         r.chunk.lastAccessed ?? null,
         r.chunk.accessCount ?? 0,
         r.chunk.timestamp,
+        r.chunk.category,
       );
       return {
         chunk: r.chunk,
@@ -501,13 +519,13 @@ export class SQLiteStorage implements StorageBackend {
 
     const db = this.getDb();
     const rows = db
-      .prepare("SELECT id, importance, last_accessed, access_count, timestamp FROM memory_chunks")
-      .all() as Pick<RawChunkRow, "id" | "importance" | "last_accessed" | "access_count" | "timestamp">[];
+      .prepare("SELECT id, importance, last_accessed, access_count, timestamp, category FROM memory_chunks")
+      .all() as Pick<RawChunkRow, "id" | "importance" | "last_accessed" | "access_count" | "timestamp" | "category">[];
 
     const toDelete: string[] = [];
     for (const row of rows) {
       const effImp = this.computeEffectiveImportance(
-        row.importance, row.last_accessed, row.access_count ?? 0, row.timestamp,
+        row.importance, row.last_accessed, row.access_count ?? 0, row.timestamp, row.category,
       );
       if (effImp < this.decayConfig.pruneThreshold) {
         toDelete.push(row.id);
