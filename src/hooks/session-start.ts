@@ -7,8 +7,19 @@ import { execSync } from "node:child_process";
 import { SQLiteStorage } from "../storage/database.js";
 import { estimateTokens } from "../utils/tokens.js";
 import { log } from "../utils/logger.js";
+import type { MemoryChunk } from "../storage/types.js";
 
 const TOKEN_BUDGET = 4000;
+
+// Priority tiers for memory selection
+const CATEGORY_PRIORITY: Record<string, number> = {
+  decision: 4,
+  error: 4,
+  preference: 3,
+  fact: 3,
+  code_pattern: 2,
+  conversation: 0,
+};
 
 function getProjectPath(): string {
   try {
@@ -28,6 +39,14 @@ function outputEmpty(): void {
       additionalContext: "",
     },
   }));
+}
+
+interface ScoredMemory {
+  chunk: MemoryChunk;
+  effectiveImportance: number;
+  isExtracted: boolean;
+  isSummary: boolean;
+  categoryPriority: number;
 }
 
 async function main() {
@@ -53,8 +72,8 @@ async function main() {
       return;
     }
 
-    // Compute effective importance for each memory
-    const scored = memories.map((chunk) => ({
+    // Score and classify each memory
+    const scored: ScoredMemory[] = memories.map((chunk) => ({
       chunk,
       effectiveImportance: storage.computeEffectiveImportance(
         chunk.importance,
@@ -63,22 +82,49 @@ async function main() {
         chunk.timestamp,
         chunk.category,
       ),
+      isExtracted: chunk.tags.includes("extracted"),
       isSummary: chunk.tags.includes("summary"),
+      categoryPriority: CATEGORY_PRIORITY[chunk.category] ?? 0,
     }));
 
-    // Sort: summaries first, then by effective importance descending
+    // Sort by: extracted knowledge first, then summaries, then by
+    // category priority, then by effective importance
     scored.sort((a, b) => {
+      // Extracted knowledge items first
+      if (a.isExtracted !== b.isExtracted) return a.isExtracted ? -1 : 1;
+      // Summaries next
       if (a.isSummary !== b.isSummary) return a.isSummary ? -1 : 1;
+      // Then by category priority
+      if (a.categoryPriority !== b.categoryPriority) return b.categoryPriority - a.categoryPriority;
+      // Then by effective importance
       return b.effectiveImportance - a.effectiveImportance;
     });
 
-    // Fit within token budget
-    const selected: typeof scored = [];
-    let totalTokens = 0;
-    const headerTokens = estimateTokens("=== Project Memory ===\n\n");
+    // Deduplicate: limit raw messages per session to max 2
+    const sessionRawCount = new Map<string, number>();
+    const MAX_RAW_PER_SESSION = 2;
 
-    totalTokens += headerTokens;
+    const selected: ScoredMemory[] = [];
+    let totalTokens = estimateTokens("=== Project Memory ===\n\n");
+
     for (const entry of scored) {
+      // For raw conversation messages, limit per session
+      if (!entry.isExtracted && !entry.isSummary && entry.chunk.category === "conversation") {
+        const sessionId = entry.chunk.tags.find((t) =>
+          !t.startsWith("project:") && !t.startsWith("auto-") && t !== "raw" && t !== "summary" && t !== "extracted"
+        );
+        if (sessionId) {
+          const count = sessionRawCount.get(sessionId) ?? 0;
+          if (count >= MAX_RAW_PER_SESSION) continue;
+          sessionRawCount.set(sessionId, count + 1);
+        }
+      }
+
+      // Skip low-importance conversation memories to make room for knowledge
+      if (entry.chunk.category === "conversation" && !entry.isSummary && entry.effectiveImportance < 0.25) {
+        continue;
+      }
+
       const line = formatMemory(entry.chunk, entry.effectiveImportance);
       const lineTokens = estimateTokens(line + "\n---\n");
       if (totalTokens + lineTokens > TOKEN_BUDGET) break;
@@ -113,9 +159,10 @@ async function main() {
   }
 }
 
-function formatMemory(chunk: { content: string; category: string; tags: string[] }, effectiveImportance: number): string {
-  const category = chunk.tags.includes("summary") ? "summary" : chunk.category;
-  return `[${category}] (importance: ${effectiveImportance.toFixed(2)}) ${chunk.content}`;
+function formatMemory(chunk: MemoryChunk, effectiveImportance: number): string {
+  const tag = chunk.tags.includes("extracted") ? chunk.category :
+    chunk.tags.includes("summary") ? "summary" : chunk.category;
+  return `[${tag}] (importance: ${effectiveImportance.toFixed(2)}) ${chunk.content}`;
 }
 
 main().catch((err) => {
