@@ -12,6 +12,17 @@ interface OllamaChatResponse {
   message?: { content?: string };
 }
 
+export interface ExtractedKnowledge {
+  category: "fact" | "decision" | "preference" | "error" | "code_pattern";
+  content: string;
+  importance: number;
+}
+
+export interface SummarizationResult {
+  summary: string;
+  extracted: ExtractedKnowledge[];
+}
+
 async function detectChatModel(ollamaUrl: string): Promise<string> {
   const response = await fetch(`${ollamaUrl}/api/tags`);
   if (!response.ok) throw new Error(`Ollama not reachable: ${response.status}`);
@@ -50,13 +61,42 @@ function formatMessages(messages: TranscriptMessage[]): string {
   return formatted;
 }
 
+const EXTRACTION_PROMPT = `Analyze this conversation and output JSON with two fields:
+
+1. "summary": A concise 2-4 sentence summary of what happened in this session.
+
+2. "extracted": An array of specific knowledge items extracted from the conversation. Each item should have:
+   - "category": one of "fact", "decision", "preference", "error", "code_pattern"
+   - "content": the specific knowledge (1-2 sentences, self-contained)
+   - "importance": 0.6-0.9 based on how useful this would be to recall in a future session
+
+Categories explained:
+- "fact": Specific technical facts learned (e.g. "The grub.cfg uses maxcpus=2 to limit CPU count on xs1 devices")
+- "decision": Choices made and their reasoning (e.g. "Decided to remove IMAGE_WAS_CACHED check because modifications are idempotent")
+- "preference": User preferences or corrections (e.g. "User prefers short responses without trailing summaries")
+- "error": Bugs found and their root causes (e.g. "Sed quoting bug: single quotes inside single-quoted bash -c block breaks the command")
+- "code_pattern": Reusable patterns or approaches (e.g. "Use double quotes for sed inside single-quoted bash -c blocks")
+
+Only extract items that would genuinely be useful to recall later. Skip trivial or obvious items. Output 0-8 items.
+
+Output ONLY valid JSON, no markdown fences, no preamble:
+{"summary": "...", "extracted": [...]}`;
+
 export async function summarizeConversation(
   messages: TranscriptMessage[],
   ollamaUrl?: string,
 ): Promise<string> {
+  const result = await extractKnowledge(messages, ollamaUrl);
+  return result.summary;
+}
+
+export async function extractKnowledge(
+  messages: TranscriptMessage[],
+  ollamaUrl?: string,
+): Promise<SummarizationResult> {
   const url = ollamaUrl || process.env.OLLAMA_URL || "http://127.0.0.1:11434";
   const model = await detectChatModel(url);
-  log.info(`Summarizing with model: ${model}`);
+  log.info(`Extracting knowledge with model: ${model}`);
 
   const conversationText = formatMessages(messages);
 
@@ -69,8 +109,7 @@ export async function summarizeConversation(
       messages: [
         {
           role: "system",
-          content:
-            "Summarize this conversation concisely. Focus on: decisions made, user preferences, code patterns, errors encountered, and key facts learned. Output only the summary, no preamble.",
+          content: EXTRACTION_PROMPT,
         },
         {
           role: "user",
@@ -85,5 +124,30 @@ export async function summarizeConversation(
   }
 
   const data = (await response.json()) as OllamaChatResponse;
-  return data.message?.content?.trim() || "";
+  const rawContent = data.message?.content?.trim() || "";
+
+  // Try to parse as structured JSON
+  try {
+    const parsed = JSON.parse(rawContent) as { summary?: string; extracted?: ExtractedKnowledge[] };
+    const summary = parsed.summary || "";
+    const extracted = (parsed.extracted || []).filter(
+      (item) =>
+        item.category &&
+        item.content &&
+        typeof item.importance === "number" &&
+        ["fact", "decision", "preference", "error", "code_pattern"].includes(item.category),
+    );
+
+    // Clamp importance values
+    for (const item of extracted) {
+      item.importance = Math.max(0.5, Math.min(0.9, item.importance));
+    }
+
+    log.info(`Extracted ${extracted.length} knowledge items + summary`);
+    return { summary, extracted };
+  } catch {
+    // Fallback: treat entire response as summary (backward compatible)
+    log.info("Could not parse structured extraction, using raw summary");
+    return { summary: rawContent, extracted: [] };
+  }
 }
